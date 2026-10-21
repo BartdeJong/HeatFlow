@@ -4,6 +4,7 @@
     addProbe,
     addSource,
     app,
+    moveItem,
     removeOpening,
     removeProbe,
     removeSource,
@@ -30,6 +31,7 @@
   } from '../sim/config';
   import { PALETTES, PALETTE_IDS, paletteCssGradient, type PaletteId } from '../render/palette';
   import Graph from './Graph.svelte';
+  import FurniturePanel from './FurniturePanel.svelte';
   import { deleteRoom, listSavedRooms, saveRoom } from '../persist/storage';
   import { shareUrl } from '../persist/share';
 
@@ -55,6 +57,8 @@
       ? app.room.sources.find((s) => s.id === app.selection!.id)
       : undefined,
   );
+  const selectedProbe = $derived(app.selection?.kind === 'probe' ? app.room.probes.find((p) => p.id === app.selection!.id) : undefined);
+  const sliceLength = $derived(app.sliceAxis === 'x' ? app.room.widthM : app.sliceAxis === 'y' ? app.room.heightM : app.room.ceilingM);
 
   function flash(text: string) {
     message = text;
@@ -106,8 +110,18 @@
   }
 </script>
 
+{#snippet positionControls(item: { id: number; x: number; y: number; z: number }, kind: 'source' | 'probe')}
+  {#each [{ key: 'x' as const, label: 'X · width', max: app.room.widthM }, { key: 'y' as const, label: 'Y · length', max: app.room.heightM }, { key: 'z' as const, label: 'Z · height above floor', max: app.room.ceilingM }] as axis}
+    <label>
+      <span>{axis.label}<output>{item[axis.key].toFixed(1)} m</output></span>
+      <input type="range" min="0" max={axis.max} step="0.1" value={item[axis.key]}
+        oninput={(e) => { const p = { ...item, [axis.key]: e.currentTarget.valueAsNumber }; moveItem(kind, item.id, p.x, p.y, p.z); }} />
+    </label>
+  {/each}
+{/snippet}
+
 <aside class="sidebar">
-  <h1>🔥 HeatFlow</h1>
+  <h1>🔥 HeatFlow <span class="tag">3D</span></h1>
 
   <fieldset>
     <legend>Simulation</legend>
@@ -127,8 +141,8 @@
     </label>
     <dl class="stats">
       <dt>Elapsed</dt><dd>{fmtTime(app.stats.elapsed)}</dd>
-      <dt>Average</dt><dd>{app.stats.mean.toFixed(1)} °C</dd>
-      <dt>Hottest</dt><dd>{app.stats.max.toFixed(1)} °C</dd>
+      <dt>Air average</dt><dd>{app.stats.mean.toFixed(1)} °C</dd>
+      <dt>Hottest air</dt><dd>{app.stats.max.toFixed(1)} °C</dd>
     </dl>
   </fieldset>
 
@@ -142,6 +156,27 @@
         {/each}
       </select>
     </label>
+    <label>
+      View
+      <select bind:value={app.view}>
+        <option value="volume">3D temperature volume</option>
+        <option value="slice">Temperature slice</option>
+      </select>
+    </label>
+    {#if app.view === 'slice'}
+      <label>
+        Slice orientation
+        <select bind:value={app.sliceAxis}>
+          <option value="z">Horizontal (Z · height)</option>
+          <option value="y">Vertical (Y · length)</option>
+          <option value="x">Vertical (X · width)</option>
+        </select>
+      </label>
+      <label>
+        <span>Slice position <output>{(app.sliceFraction * sliceLength).toFixed(1)} m</output></span>
+        <input type="range" min="0" max="1" step="0.01" bind:value={app.sliceFraction} />
+      </label>
+    {/if}
     <label class="check">
       <input
         type="checkbox"
@@ -151,7 +186,13 @@
       Convection (hot air rises)
     </label>
     {#if app.room.convection}
-      <p class="hint">The room is shown as a side view (up is up). Toggling this restarts the simulation.</p>
+      <label class="check">
+        <input type="checkbox" bind:checked={app.showAirflow} />
+        Show airflow trails
+      </label>
+      <p class="hint">Warm air rises along Z and circulates through the 3D room. Toggling convection restarts the simulation.</p>
+    {:else}
+      <p class="hint">Heat clouds show the air temperature throughout the room. Enable convection to see rising plumes and airflow trails.</p>
     {/if}
   </fieldset>
 
@@ -191,12 +232,15 @@
           oninput={(e) => updateSource(selectedSource.id, { powerKW: e.currentTarget.valueAsNumber })}
         />
       </label>
+      {@render positionControls(selectedSource, 'source')}
       <button onclick={() => holdSource(selectedSource.id)}>⚖ Hold room at 20 °C</button>
       {#if holdMsg}<p class="hint">{holdMsg}</p>{/if}
     {:else}
-      <p class="hint">Select a source to adjust it. Click or drag in the room to move the selected one.</p>
+      <p class="hint">Select a source to adjust its power and 3D position. Drag it to move; Shift-drag to change height.</p>
     {/if}
   </fieldset>
+
+  <FurniturePanel />
 
   <fieldset>
     <legend>Walls</legend>
@@ -242,7 +286,7 @@
         oninput={(e) => updateWall({ insulationM: e.currentTarget.valueAsNumber })}
       />
     </label>
-    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better).</p>
+    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The same construction covers the floor and ceiling.</p>
   </fieldset>
 
   <fieldset>
@@ -292,6 +336,16 @@
           />
         </label>
         <label>
+          <span>Opening height <output>{o.heightM.toFixed(1)} m</output></span>
+          <input type="range" min="0.3" max={app.room.ceilingM} step="0.1" value={o.heightM}
+            oninput={(e) => updateOpening(o.id, { heightM: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label>
+          <span>Sill above floor <output>{o.sillM.toFixed(1)} m</output></span>
+          <input type="range" min="0" max={app.room.ceilingM - o.heightM} step="0.1" value={o.sillM}
+            oninput={(e) => updateOpening(o.id, { sillM: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label>
           <span>Width <output>{o.length.toFixed(1)} m</output></span>
           <input
             type="range"
@@ -315,8 +369,12 @@
         <button onclick={() => removeProbe(p.id)} aria-label="Remove probe {p.id}">✕ {p.id}</button>
       {/each}
     </div>
+    {#if selectedProbe}
+      <p class="hint">Probe {selectedProbe.id} position</p>
+      {@render positionControls(selectedProbe, 'probe')}
+    {/if}
     <Graph />
-    <p class="hint">Drag numbered probes in the room to measure any spot.</p>
+    <p class="hint">Select a numbered probe to set its 3D position. Arrow keys move markers; Page Up/Down changes height.</p>
   </fieldset>
 
   <fieldset>
@@ -333,7 +391,7 @@
       />
     </label>
     <label>
-      <span>{app.room.convection ? 'Height' : 'Length'} <output>{app.room.heightM.toFixed(1)} m</output></span>
+      <span>Length <output>{app.room.heightM.toFixed(1)} m</output></span>
       <input
         type="range"
         min={LIMITS.size.min}
@@ -344,7 +402,7 @@
       />
     </label>
     <label>
-      <span>{app.room.convection ? 'Length (depth)' : 'Ceiling height'} <output>{app.room.ceilingM.toFixed(1)} m</output></span>
+      <span>Ceiling height <output>{app.room.ceilingM.toFixed(1)} m</output></span>
       <input
         type="range"
         min={LIMITS.size.min}
@@ -399,6 +457,7 @@
 </aside>
 
 <style>
+  .tag { font-size: 11px; color: #ffb27a; border: 1px solid #785339; border-radius: 5px; padding: 3px 6px; vertical-align: middle; }
   .sidebar {
     display: flex;
     flex-direction: column;

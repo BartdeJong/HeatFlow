@@ -3,6 +3,35 @@ export type InsulationId = 'mineral' | 'eps' | 'pir';
 export type SourceKind = 'heat' | 'cold';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
+export type FurnitureKind = 'sofa' | 'table' | 'cabinet' | 'bed';
+export type FurnitureMaterial = 'wood' | 'fabric' | 'metal';
+
+export interface Furniture {
+  id: number;
+  kind: FurnitureKind;
+  material: FurnitureMaterial;
+  /** Centre on the floor plan, metres. Furniture rests on the floor. */
+  x: number;
+  y: number;
+  widthM: number;
+  depthM: number;
+  heightM: number;
+  rotation: 0 | 90;
+}
+
+/** Effective material parameters for the simplified furniture model, not product specifications. */
+export const FURNITURE_MATERIALS: ReadonlyArray<{ id: FurnitureMaterial; label: string; k: number; capacity: number; h: number }> = [
+  { id: 'wood', label: 'Wood', k: 0.15, capacity: 650_000, h: 4 },
+  { id: 'fabric', label: 'Upholstery', k: 0.06, capacity: 100_000, h: 3 },
+  { id: 'metal', label: 'Metal', k: 12, capacity: 1_800_000, h: 6 },
+];
+
+export const FURNITURE_PRESETS: ReadonlyArray<{ id: FurnitureKind; label: string; widthM: number; depthM: number; heightM: number; material: FurnitureMaterial }> = [
+  { id: 'sofa', label: 'Sofa', widthM: 2, depthM: 0.9, heightM: 0.85, material: 'fabric' },
+  { id: 'table', label: 'Table', widthM: 1.4, depthM: 0.9, heightM: 0.8, material: 'wood' },
+  { id: 'cabinet', label: 'Cabinet', widthM: 1.2, depthM: 0.5, heightM: 1.8, material: 'wood' },
+  { id: 'bed', label: 'Bed', widthM: 1.6, depthM: 2, heightM: 0.6, material: 'fabric' },
+];
 
 export interface WallConfig {
   material: WallMaterialId;
@@ -17,6 +46,8 @@ export interface HeatSource {
   kind: SourceKind;
   x: number;
   y: number;
+  /** Height above the floor, metres. x/y locate the point on the floor plan. */
+  z: number;
   /** Output magnitude in kW. Cold sources remove this much heat. */
   powerKW: number;
 }
@@ -28,6 +59,8 @@ export interface Opening {
   /** Centre of the opening along its wall, in metres from the wall's start (left or top). */
   pos: number;
   length: number;
+  heightM: number;
+  sillM: number;
   open: boolean;
 }
 
@@ -35,21 +68,23 @@ export interface Probe {
   id: number;
   x: number;
   y: number;
+  z: number;
 }
 
 export interface RoomConfig {
   widthM: number;
   heightM: number;
-  /** Third dimension, m. Ceiling height in plan view; the depth of the slice in convection (side) view. */
+  /** Vertical room dimension, metres. heightM is the floor-plan length (y). */
   ceilingM: number;
   /** Outside air temperature, °C. */
   outsideC: number;
-  /** Simulate hot-air buoyancy; the view is then a side section with the ceiling at the top. */
+  /** Simulate buoyancy-driven airflow in all three dimensions; z points up. */
   convection: boolean;
   wall: WallConfig;
   sources: HeatSource[];
   openings: Opening[];
   probes: Probe[];
+  furniture: Furniture[];
 }
 
 export interface PhysicsParams {
@@ -58,7 +93,7 @@ export interface PhysicsParams {
   alpha: number;
   /** Diffusivity used when convection is simulated explicitly, m²/s. */
   convectionAlpha: number;
-  /** Multiplier on air heat capacity to account for furniture and wall surfaces. */
+  /** Multiplier on air heat capacity for wall surfaces and unmodelled contents; explicit furniture has its own capacity. */
   massFactor: number;
   airDensity: number;
   airCp: number;
@@ -80,9 +115,9 @@ export const INSULATIONS: ReadonlyArray<{ id: InsulationId; label: string; k: nu
 ];
 
 export const SIDES: ReadonlyArray<{ id: WallSide; label: string }> = [
-  { id: 'top', label: 'Top' },
+  { id: 'top', label: 'Back (y = 0)' },
   { id: 'right', label: 'Right' },
-  { id: 'bottom', label: 'Bottom' },
+  { id: 'bottom', label: 'Front (y = length)' },
   { id: 'left', label: 'Left' },
 ];
 
@@ -108,6 +143,7 @@ export const LIMITS = {
   sources: 8,
   openings: 8,
   probes: 3,
+  furniture: 8,
 } as const;
 
 export const DEFAULT_WALL: WallConfig = {
@@ -124,9 +160,10 @@ export const DEFAULT_ROOM: RoomConfig = {
   outsideC: 0,
   convection: false,
   wall: DEFAULT_WALL,
-  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, powerKW: 0.97 }],
+  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: 0.4, powerKW: 1.83 }],
   openings: [],
   probes: [],
+  furniture: [],
 };
 
 export const DEFAULT_PHYSICS: PhysicsParams = {
@@ -164,19 +201,29 @@ export function openingU(o: Pick<Opening, 'kind' | 'open'>): number {
 
 /** Total heat loss in watts through all walls and openings if the whole room sat at `targetC`. */
 export function holdLossW(room: RoomConfig, targetC: number): number {
-  const wall = wallU(room.wall);
-  let ua = 0;
+  // Floor and ceiling use the same construction and outside temperature as the walls.
+  let ua = 2 * room.widthM * room.heightM * wallU(room.wall);
   for (const { id } of SIDES) {
-    const len = wallLength(room, id);
-    let openLen = 0;
-    for (const o of room.openings) {
-      if (o.side !== id) continue;
-      openLen += o.length;
-      ua += openingU(o) * o.length;
+    for (const p of wallRegions(room, id)) {
+      ua += p.u * (p.to - p.from) * (p.top - p.bottom);
     }
-    ua += wall * Math.max(0, len - openLen);
   }
-  return ua * room.ceilingM * (targetC - room.outsideC);
+  return ua * (targetC - room.outsideC);
+}
+
+/** Non-overlapping patches of a vertical wall. The last opening wins where openings overlap. */
+export function wallRegions(room: RoomConfig, side: WallSide) {
+  const openings = room.openings.filter((o) => o.side === side);
+  const xs = [...new Set([0, wallLength(room, side), ...openings.flatMap((o) => [o.pos - o.length / 2, o.pos + o.length / 2])])].sort((a, b) => a - b);
+  const zs = [...new Set([0, room.ceilingM, ...openings.flatMap((o) => [o.sillM, o.sillM + o.heightM])])].sort((a, b) => a - b);
+  const regions: { from: number; to: number; bottom: number; top: number; u: number }[] = [];
+  for (let z = 1; z < zs.length; z++) for (let x = 1; x < xs.length; x++) {
+    const cx = (xs[x - 1] + xs[x]) / 2;
+    const cz = (zs[z - 1] + zs[z]) / 2;
+    const opening = openings.findLast((o) => Math.abs(cx - o.pos) < o.length / 2 && cz > o.sillM && cz < o.sillM + o.heightM);
+    regions.push({ from: xs[x - 1], to: xs[x], bottom: zs[z - 1], top: zs[z], u: opening ? openingU(opening) : wallU(room.wall) });
+  }
+  return regions;
 }
 
 /**
@@ -251,6 +298,7 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
       kind: pick(s.kind, SOURCE_KINDS, 'heat'),
       x: clamp(s.x, 0, widthM),
       y: clamp(s.y, 0, heightM),
+      z: clamp(s.z ?? Math.min(0.4, ceilingM / 2), 0, ceilingM),
       powerKW: clamp(s.powerKW, LIMITS.power.min, LIMITS.power.max),
     })),
   );
@@ -260,12 +308,15 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
       const side = pick(o.side, sideIds, 'top');
       const wl = wallLength({ widthM, heightM }, side);
       const length = clamp(o.length, LIMITS.openingLength.min, Math.max(LIMITS.openingLength.min, wl - 0.2));
+      const height = clamp(o.heightM ?? (o.kind === 'door' ? 2.1 : 1.2), 0.3, ceilingM);
       return {
         id: o.id as number,
         kind: pick(o.kind, OPENING_KINDS, 'window'),
         side,
         pos: clamp(o.pos, length / 2, wl - length / 2),
         length,
+        heightM: height,
+        sillM: clamp(o.sillM ?? (o.kind === 'door' ? 0 : 0.8), 0, ceilingM - height),
         open: o.open === true,
       };
     }),
@@ -276,8 +327,27 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
       id: p.id as number,
       x: clamp(p.x, 0, widthM),
       y: clamp(p.y, 0, heightM),
+      z: clamp(p.z ?? ceilingM / 2, 0, ceilingM),
     })),
   );
+
+  const furniture = withIds(entries<Furniture>(c.furniture, LIMITS.furniture).map((f): Furniture => {
+    const kind = pick(f.kind, FURNITURE_PRESETS.map((p) => p.id), 'sofa');
+    const preset = FURNITURE_PRESETS.find((p) => p.id === kind)!;
+    const rotation = f.rotation === 90 ? 90 : 0;
+    const fw = clamp(f.widthM ?? preset.widthM, 0.4, rotation === 90 ? heightM : widthM);
+    const fd = clamp(f.depthM ?? preset.depthM, 0.4, rotation === 90 ? widthM : heightM);
+    const halfX = (rotation === 90 ? fd : fw) / 2;
+    const halfY = (rotation === 90 ? fw : fd) / 2;
+    return {
+      id: f.id as number, kind, rotation,
+      material: pick(f.material, FURNITURE_MATERIALS.map((m) => m.id), preset.material),
+      x: clamp(f.x ?? widthM / 2, halfX, widthM - halfX),
+      y: clamp(f.y ?? heightM / 2, halfY, heightM - halfY),
+      widthM: fw, depthM: fd,
+      heightM: clamp(f.heightM ?? preset.heightM, 0.4, ceilingM),
+    };
+  }));
 
   return {
     widthM,
@@ -289,6 +359,7 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
     sources,
     openings,
     probes,
+    furniture,
   };
 }
 
@@ -309,7 +380,7 @@ export function legacyRoom(
     widthM,
     heightM,
     wall: { ...base, insulationM: Math.max(0, rNeeded) * ins.k },
-    sources: [{ id: 1, kind: 'heat', x: sourceX, y: sourceY, powerKW }],
+    sources: [{ id: 1, kind: 'heat', x: sourceX, y: sourceY, z: 0.4, powerKW }],
   });
 }
 

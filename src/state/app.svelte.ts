@@ -1,9 +1,12 @@
 import {
   DEFAULT_ROOM,
+  FURNITURE_PRESETS,
   LIMITS,
   nextId,
   sanitizeRoom,
   type HeatSource,
+  type Furniture,
+  type FurnitureKind,
   type Opening,
   type OpeningKind,
   type RoomConfig,
@@ -13,10 +16,11 @@ import {
 import { Recorder } from '../sim/recorder';
 import { roomFromHash } from '../persist/share';
 import type { PaletteId } from '../render/palette';
+import { furnitureExtent } from '../sim/furniture';
 
 export const SPEEDS = [1, 10, 30, 100, 300, 1000] as const;
 
-export type Selection = { kind: 'source' | 'probe' | 'opening'; id: number } | null;
+export type Selection = { kind: 'source' | 'probe' | 'opening' | 'furniture'; id: number } | null;
 
 function initialRoom(): RoomConfig {
   return roomFromHash(location.hash) ?? structuredClone(DEFAULT_ROOM);
@@ -27,11 +31,17 @@ export const app = $state({
   running: true,
   speed: 300 as number,
   palette: 'heat' as PaletteId,
+  view: 'volume' as 'volume' | 'slice',
+  showAirflow: true,
+  sliceAxis: 'z' as 'x' | 'y' | 'z',
+  sliceFraction: 0.5,
+  cameraToken: 0,
   selection: null as Selection,
   /** Incremented to request a simulation reset. */
   resetToken: 0,
   /** Incremented whenever the recorder gains a sample, so graphs can redraw. */
   graphTick: 0,
+  furnitureTemperatures: {} as Record<number, number>,
   stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30 },
 });
 
@@ -89,6 +99,7 @@ export function addSource(kind: SourceKind): void {
       kind,
       x: r.widthM * fx,
       y: r.heightM * fy,
+      z: kind === 'heat' ? 0.4 : Math.max(0.4, r.ceilingM - 0.5),
       powerKW: kind === 'heat' ? 1.5 : 1,
     });
   });
@@ -119,6 +130,8 @@ export function addOpening(kind: OpeningKind): void {
       side: 'top',
       pos: r.widthM / 2,
       length: kind === 'window' ? 1.2 : 0.9,
+      heightM: kind === 'window' ? 1.2 : 2.1,
+      sillM: kind === 'window' ? 0.8 : 0,
       open: false,
     });
   });
@@ -143,7 +156,7 @@ export function addProbe(): void {
   if (app.room.probes.length >= LIMITS.probes) return;
   const id = nextId(app.room.probes);
   edit((r) => {
-    r.probes.push({ id, x: r.widthM * (0.2 + 0.25 * (id - 1)), y: r.heightM * 0.25 });
+    r.probes.push({ id, x: r.widthM * (0.2 + 0.25 * (id - 1)), y: r.heightM * 0.25, z: r.ceilingM / 2 });
   });
   app.selection = { kind: 'probe', id };
 }
@@ -155,10 +168,49 @@ export function removeProbe(id: number): void {
   if (app.selection?.kind === 'probe' && app.selection.id === id) app.selection = null;
 }
 
-/** Move a source or probe to a position in metres. */
-export function moveItem(kind: 'source' | 'probe', id: number, x: number, y: number): void {
+export function addFurniture(kind: FurnitureKind): void {
+  if (app.room.furniture.length >= LIMITS.furniture) return;
+  const preset = FURNITURE_PRESETS.find((p) => p.id === kind)!;
+  const id = nextId(app.room.furniture);
+  edit((r) => {
+    const widthM = Math.min(preset.widthM, r.widthM), depthM = Math.min(preset.depthM, r.heightM);
+    let x = r.widthM / 2, y = depthM / 2;
+    for (const fy of [0.1, 0.9, 0.5, 0.3, 0.7]) {
+      let found = false;
+      for (const fx of [0.1, 0.9, 0.5, 0.3, 0.7]) {
+        const cx = widthM / 2 + (r.widthM - widthM) * fx;
+        const cy = depthM / 2 + (r.heightM - depthM) * fy;
+        const occupied = r.furniture.some((f) => {
+          const [w, d] = furnitureExtent(f);
+          return Math.abs(cx - f.x) < (widthM + w) / 2 + 0.1 && Math.abs(cy - f.y) < (depthM + d) / 2 + 0.1;
+        }) || r.sources.some((s) => s.z < preset.heightM && Math.abs(cx - s.x) < widthM / 2 + 0.3 && Math.abs(cy - s.y) < depthM / 2 + 0.3);
+        if (!occupied) { x = cx; y = cy; found = true; break; }
+      }
+      if (found) break;
+    }
+    r.furniture.push({ id, kind, material: preset.material, x, y, widthM, depthM, heightM: preset.heightM, rotation: 0 });
+  });
+  select({ kind: 'furniture', id });
+}
+
+export function updateFurniture(id: number, patch: Partial<Omit<Furniture, 'id'>>): void {
+  edit((r) => { const f = r.furniture.find((item) => item.id === id); if (f) Object.assign(f, patch); });
+}
+
+export function removeFurniture(id: number): void {
+  edit((r) => { r.furniture = r.furniture.filter((f) => f.id !== id); });
+  if (app.selection?.kind === 'furniture' && app.selection.id === id) select(null);
+}
+
+/** Move a source, probe, or piece of furniture to a position in metres. */
+export function moveItem(kind: 'source' | 'probe' | 'furniture', id: number, x: number, y: number, z?: number): void {
+  if (kind === 'furniture') { updateFurniture(id, { x, y }); return; }
   edit((r) => {
     const item = (kind === 'source' ? r.sources : r.probes).find((i) => i.id === id);
-    if (item) Object.assign(item, { x, y });
+    if (item) Object.assign(item, { x, y, ...(z === undefined ? {} : { z }) });
   });
+  if (kind === 'probe') {
+    recorder.clearSeries(`p${id}`);
+    app.graphTick++;
+  }
 }

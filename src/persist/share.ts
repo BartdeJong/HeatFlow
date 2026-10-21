@@ -1,5 +1,7 @@
 import {
   DEFAULT_ROOM,
+  FURNITURE_PRESETS,
+  FURNITURE_MATERIALS,
   INSULATIONS,
   OPENING_KINDS,
   SIDES,
@@ -10,7 +12,7 @@ import {
   type RoomConfig,
 } from '../sim/config';
 
-const VERSION = 2;
+const VERSION = 4;
 
 const r = (v: number, d = 3) => Number(v.toFixed(d));
 const isNum = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
@@ -27,17 +29,21 @@ export function encodeRoom(room: RoomConfig): string {
     r(room.wall.thicknessM),
     INSULATIONS.findIndex((m) => m.id === room.wall.insulation),
     r(room.wall.insulationM),
-    room.sources.map((s) => [SOURCE_KINDS.indexOf(s.kind), r(s.x), r(s.y), r(s.powerKW)]),
+    room.sources.map((s) => [SOURCE_KINDS.indexOf(s.kind), r(s.x), r(s.y), r(s.z), r(s.powerKW)]),
     room.openings.map((o) => [
       OPENING_KINDS.indexOf(o.kind),
       SIDES.findIndex((s) => s.id === o.side),
       r(o.pos),
       r(o.length),
       o.open ? 1 : 0,
+      r(o.heightM),
+      r(o.sillM),
     ]),
-    room.probes.map((p) => [r(p.x), r(p.y)]),
+    room.probes.map((p) => [r(p.x), r(p.y), r(p.z)]),
     r(room.ceilingM),
     r(room.outsideC),
+    room.furniture.map((f) => [FURNITURE_PRESETS.findIndex((p) => p.id === f.kind), FURNITURE_MATERIALS.findIndex((m) => m.id === f.material),
+      r(f.x), r(f.y), r(f.widthM), r(f.depthM), r(f.heightM), f.rotation]),
   ];
   const b64 = btoa(JSON.stringify(arr));
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -66,18 +72,23 @@ export function decodeRoom(code: string): RoomConfig | null {
       return legacyRoom(w, h, p, u, sx, sy);
     }
 
-    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 13) return null;
+    const furnished = arr[0] === VERSION;
+    const volumetric = furnished || arr[0] === 3;
+    if ((!volumetric && arr[0] !== 2) || arr.length < 11 || arr.length > (furnished ? 14 : 13)) return null;
+    if (volumetric && arr.length !== (furnished ? 14 : 13)) return null;
     const head = arr.slice(1, 8);
     if (!allNums(head)) return null;
     const [widthM, heightM, conv, mat, thick, ins, insM] = head as number[];
-    const sources = rows(arr[8], 4);
-    const openings = rows(arr[9], 5);
-    const probes = rows(arr[10], 2);
+    const sources = rows(arr[8], volumetric ? 5 : 4);
+    const openings = rows(arr[9], volumetric ? 7 : 5);
+    const probes = rows(arr[10], volumetric ? 3 : 2);
     if (!sources || !openings || !probes) return null;
     if (arr.length >= 12 && !isNum(arr[11])) return null;
-    if (arr.length === 13 && !isNum(arr[12])) return null;
+    if (arr.length >= 13 && !isNum(arr[12])) return null;
     const ceilingM = arr.length >= 12 ? (arr[11] as number) : undefined;
-    const outsideC = arr.length === 13 ? (arr[12] as number) : undefined;
+    const outsideC = arr.length >= 13 ? (arr[12] as number) : undefined;
+    const furniture = furnished ? rows(arr[13], 8) : [];
+    if (!furniture) return null;
 
     return sanitizeRoom({
       widthM,
@@ -91,22 +102,29 @@ export function decodeRoom(code: string): RoomConfig | null {
         insulation: INSULATIONS[ins]?.id,
         insulationM: insM,
       },
-      sources: sources.map(([k, x, y, powerKW], i) => ({
+      sources: sources.map(([k, x, y, fourth, fifth], i) => ({
         id: i + 1,
         kind: SOURCE_KINDS[k],
         x,
         y,
-        powerKW,
+        z: volumetric ? fourth : 0.4,
+        powerKW: volumetric ? fifth : fourth,
       })),
-      openings: openings.map(([k, s, pos, length, open], i) => ({
+      openings: openings.map(([k, s, pos, length, open, height, sill], i) => ({
         id: i + 1,
         kind: OPENING_KINDS[k],
         side: SIDES[s]?.id,
         pos,
         length,
         open: open === 1,
+        heightM: volumetric ? height : OPENING_KINDS[k] === 'door' ? 2.1 : 1.2,
+        sillM: volumetric ? sill : OPENING_KINDS[k] === 'door' ? 0 : 0.8,
       })),
-      probes: probes.map(([x, y], i) => ({ id: i + 1, x, y })),
+      probes: probes.map(([x, y, z], i) => ({ id: i + 1, x, y, z: volumetric ? z : (ceilingM ?? DEFAULT_ROOM.ceilingM) / 2 })),
+      furniture: furniture.map(([kind, material, x, y, widthM, depthM, heightM, rotation], i) => ({
+        id: i + 1, kind: FURNITURE_PRESETS[kind]?.id, material: FURNITURE_MATERIALS[material]?.id,
+        x, y, widthM, depthM, heightM, rotation: rotation === 90 ? 90 : 0,
+      })),
     });
   } catch {
     return null;

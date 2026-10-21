@@ -1,403 +1,355 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { createRenderer, type HeatmapRenderer } from '../render/heatmap';
+  import { createRenderer, fitCanvas, type HeatmapRenderer } from '../render/heatmap';
+  import { defaultCamera, pointOnPlane, project, screenRay, viewTransform, type Vec3, type ViewTransform } from '../render/camera';
+  import { traceAirflow } from '../render/airflow';
+  import { paletteColor } from '../render/palette';
   import { Simulation } from '../sim/simulation';
-  import { app, moveItem, recorder, select, updateOpening } from '../state/app.svelte';
+  import type { Opening } from '../sim/config';
+  import { FURNITURE_PRESETS } from '../sim/config';
+  import { furnitureBoxes, intersectBox } from '../sim/furniture';
+  import { app, moveItem, recorder, select, updateFurniture, updateOpening } from '../state/app.svelte';
 
   let canvas: HTMLCanvasElement;
+  let overlay: HTMLCanvasElement;
   let roomEl: HTMLDivElement;
   let renderer: HeatmapRenderer | undefined;
   let sim = new Simulation($state.snapshot(app.room));
-  let simKey = `${app.room.widthM}|${app.room.heightM}|${app.room.ceilingM}|${app.room.convection}`;
-  let drag = $state<{ kind: 'source' | 'probe'; id: number } | null>(null);
-  let hover = $state<{ px: number; py: number; temp: number } | null>(null);
-  let hoverRaw: { x: number; y: number; px: number; py: number } | null = null;
+  const simulationKey = () => `${app.room.widthM}|${app.room.heightM}|${app.room.ceilingM}|${app.room.convection}|${JSON.stringify(app.room.furniture)}`;
+  let simKey = simulationKey();
+  let camera = defaultCamera();
+  let transform: ViewTransform | undefined;
+  let pendingSeconds = 0;
+  let drag: { kind: 'source' | 'probe' | 'furniture'; id: number; x: number; y: number; z: number; px: number; py: number } | null = null;
+  let orbit: { px: number; py: number } | null = null;
+  let hoverRaw: { px: number; py: number } | null = null;
+  let hover = $state<{ px: number; py: number; temp: number; z: number } | null>(null);
+  let markers = $state<{ kind: 'source' | 'probe'; id: number; px: number; py: number; x: number; y: number; z: number; cold: boolean }[]>([]);
+  let openingMarkers = $state<{ id: number; px: number; py: number; kind: string; open: boolean }[]>([]);
+  let furnitureMarkers = $state<{ id: number; label: string; px: number; py: number }[]>([]);
+  const boxes = $derived(app.room.furniture.flatMap(furnitureBoxes));
+  let airflow: Vec3[][] = [];
+  let airflowSim: Simulation | undefined;
+  let airflowElapsed = -1;
+  let airflowUpdated = -Infinity;
+  let airflowPhase = 0;
 
-  // Rebuild the grid only when size or convection mode actually change.
   $effect(() => {
-    const key = `${app.room.widthM}|${app.room.heightM}|${app.room.ceilingM}|${app.room.convection}`;
+    const key = simulationKey();
     untrack(() => {
       if (key === simKey) return;
-      simKey = key;
-      sim = new Simulation($state.snapshot(app.room));
-      recorder.clear();
-      app.graphTick++;
+      simKey = key; sim = new Simulation($state.snapshot(app.room));
+      pendingSeconds = 0; recorder.clear(); app.graphTick++;
     });
   });
-
-  // Push live-adjustable settings into the running simulation.
   $effect(() => {
     const r = $state.snapshot(app.room);
     untrack(() => sim.setRoom(r));
   });
-
   $effect(() => {
     app.resetToken;
-    untrack(() => {
-      sim.reset();
-      recorder.clear();
-      app.graphTick++;
-    });
+    untrack(() => { sim.reset(); pendingSeconds = 0; recorder.clear(); app.graphTick++; });
   });
-
-  $effect(() => {
-    const p = app.palette;
-    renderer?.setPalette(p);
-  });
-
+  $effect(() => { renderer?.setPalette(app.palette); });
+  $effect(() => { app.cameraToken; untrack(() => { camera = defaultCamera(); }); });
   $effect(() => {
     const keep = new Set(['avg', ...app.room.probes.map((p) => `p${p.id}`)]);
     untrack(() => recorder.removeSeriesExcept(keep));
   });
 
-  function pointToRoom(e: PointerEvent) {
+  function localPoint(e: PointerEvent) {
     const rect = roomEl.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * app.room.widthM;
-    const y = ((e.clientY - rect.top) / rect.height) * app.room.heightM;
-    return { x, y, px: e.clientX - rect.left, py: e.clientY - rect.top };
+    return { px: e.clientX - rect.left, py: e.clientY - rect.top };
   }
-
-  function move(kind: 'source' | 'probe', id: number, x: number, y: number) {
-    moveItem(kind, id, x, y);
-    if (kind === 'probe') recorder.clearSeries(`p${id}`);
-  }
-
-  function startDrag(e: PointerEvent, kind: 'source' | 'probe', id: number) {
-    e.stopPropagation();
+  function startDrag(e: PointerEvent, kind: 'source' | 'probe' | 'furniture', id: number) {
+    if (e.button !== 0) return;
+    e.stopPropagation(); e.preventDefault();
+    const item = (kind === 'source' ? app.room.sources : kind === 'probe' ? app.room.probes : app.room.furniture).find((s) => s.id === id);
+    if (!item) return;
     roomEl.setPointerCapture(e.pointerId);
     select({ kind, id });
-    drag = { kind, id };
+    drag = { kind, id, x: item.x, y: item.y, z: 'z' in item ? item.z : item.heightM, ...localPoint(e) };
+    hoverRaw = null; hover = null;
   }
-
   function onPointerDown(e: PointerEvent) {
-    const sel = app.selection;
-    if (!sel || sel.kind === 'opening') return;
-    roomEl.setPointerCapture(e.pointerId);
-    drag = { kind: sel.kind, id: sel.id };
-    const p = pointToRoom(e);
-    move(sel.kind, sel.id, p.x, p.y);
-    hoverRaw = p;
+    if (e.button !== 0 && e.button !== 2) return;
+    if (e.button === 0 && transform) {
+      const { px, py } = localPoint(e), ray = screenRay(transform, px, py);
+      let closest = Infinity, id: number | undefined;
+      for (const box of boxes) {
+        const t = intersectBox(ray.origin, ray.direction, box);
+        if (t !== null && t <= closest) { closest = t; id = box.id; }
+      }
+      if (id !== undefined) { startDrag(e, 'furniture', id); return; }
+    }
+    roomEl.setPointerCapture(e.pointerId); orbit = localPoint(e);
+    hover = null;
   }
-
   function onPointerMove(e: PointerEvent) {
-    const p = pointToRoom(e);
+    const p = localPoint(e);
+    if (orbit) {
+      camera.yaw += (p.px - orbit.px) * 0.008;
+      camera.pitch = Math.max(0.12, Math.min(1.45, camera.pitch + (p.py - orbit.py) * 0.008));
+      orbit = p; return;
+    }
+    if (drag && transform) {
+      if (e.shiftKey && drag.kind !== 'furniture') moveItem(drag.kind, drag.id, drag.x, drag.y, drag.z - (p.py - drag.py) / transform.scale);
+      else {
+        const from = pointOnPlane(transform, drag.px, drag.py, 2, drag.z);
+        const to = pointOnPlane(transform, p.px, p.py, 2, drag.z);
+        if (from && to) moveItem(drag.kind, drag.id, drag.x + to[0] - from[0], drag.y + to[1] - from[1], drag.z);
+      }
+      return;
+    }
     hoverRaw = p;
-    if (drag) move(drag.kind, drag.id, p.x, p.y);
   }
-
   function onPointerUp(e: PointerEvent) {
-    drag = null;
-    if (e.pointerType !== 'mouse') hoverRaw = null;
+    drag = null; orbit = null;
+    if (roomEl.hasPointerCapture(e.pointerId)) roomEl.releasePointerCapture(e.pointerId);
+    if (e.pointerType !== 'mouse') { hoverRaw = null; hover = null; }
   }
-
-  function onKey(e: KeyboardEvent, kind: 'source' | 'probe', id: number, x: number, y: number) {
+  function zoom(factor: number) { camera.zoom = Math.max(0.55, Math.min(2.4, camera.zoom * factor)); }
+  function onKey(e: KeyboardEvent, m: typeof markers[number]) {
     const step = e.shiftKey ? 0.5 : 0.1;
-    const d: Record<string, [number, number]> = {
-      ArrowLeft: [-step, 0],
-      ArrowRight: [step, 0],
-      ArrowUp: [0, -step],
-      ArrowDown: [0, step],
+    const directions: Record<string, Vec3> = { ArrowLeft: [-step, 0, 0], ArrowRight: [step, 0, 0], ArrowUp: [0, -step, 0], ArrowDown: [0, step, 0], PageUp: [0, 0, step], PageDown: [0, 0, -step] };
+    const d = directions[e.key];
+    if (!d) return;
+    e.preventDefault(); moveItem(m.kind, m.id, m.x + d[0], m.y + d[1], m.z + d[2]);
+  }
+  function onFurnitureKey(e: KeyboardEvent, id: number) {
+    const f = app.room.furniture.find((item) => item.id === id);
+    if (!f) return;
+    const step = e.shiftKey ? 0.5 : 0.1;
+    const d: Record<string, [number, number]> = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    if (d[e.key]) { e.preventDefault(); moveItem('furniture', id, f.x + d[e.key][0], f.y + d[e.key][1]); }
+    if (e.key.toLowerCase() === 'r') { e.preventDefault(); updateFurniture(id, { rotation: f.rotation === 0 ? 90 : 0 }); }
+  }
+  function openingPoints(o: Opening): Vec3[] {
+    const a = o.pos - o.length / 2, b = o.pos + o.length / 2;
+    const lo = o.sillM, hi = lo + o.heightM;
+    if (o.side === 'top' || o.side === 'bottom') {
+      const y = o.side === 'top' ? 0 : app.room.heightM;
+      return [[a, y, lo], [b, y, lo], [b, y, hi], [a, y, hi]];
+    }
+    const x = o.side === 'left' ? 0 : app.room.widthM;
+    return [[x, a, lo], [x, b, lo], [x, b, hi], [x, a, hi]];
+  }
+
+  function drawOverlay(v: ViewTransform, tMin: number, tMax: number, now: number) {
+    const dpr = fitCanvas(overlay, 2);
+    const ctx = overlay.getContext('2d')!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, v.width, v.height);
+    const { widthM: w, heightM: l, ceilingM: h } = app.room;
+    const line = (a: Vec3, b: Vec3, color: string, width = 1) => {
+      const p = project(v, a), q = project(v, b);
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
     };
-    const v = d[e.key];
-    if (!v) return;
-    e.preventDefault();
-    move(kind, id, x + v[0], y + v[1]);
-  }
-
-  function toggleOpening(e: Event, id: number, open: boolean) {
-    e.stopPropagation();
-    select({ kind: 'opening', id });
-    updateOpening(id, { open: !open });
-  }
-
-  function segment(o: { side: string; pos: number; length: number }) {
-    const a = o.pos - o.length / 2;
-    const b = o.pos + o.length / 2;
-    const { widthM: w, heightM: h } = app.room;
-    switch (o.side) {
-      case 'top':
-        return { x1: a, y1: 0, x2: b, y2: 0 };
-      case 'bottom':
-        return { x1: a, y1: h, x2: b, y2: h };
-      case 'left':
-        return { x1: 0, y1: a, x2: 0, y2: b };
-      default:
-        return { x1: w, y1: a, x2: w, y2: b };
+    for (let x = 0; x <= w; x++) line([x, 0, 0], [x, l, 0], '#ffffff14');
+    for (let y = 0; y <= l; y++) line([0, y, 0], [w, y, 0], '#ffffff14');
+    for (const z of [0, h]) {
+      const corners: Vec3[] = [[0, 0, z], [w, 0, z], [w, l, z], [0, l, z]];
+      for (let i = 0; i < 4; i++) line(corners[i], corners[(i + 1) % 4], z === 0 ? '#c7d6e5a0' : '#bfd4e766', z === 0 ? 2 : 1);
+    }
+    for (const [x, y] of [[0, 0], [w, 0], [w, l], [0, l]]) line([x, y, 0], [x, y, h], '#bfd4e780', 1.5);
+    for (const o of app.room.openings) {
+      const points = openingPoints(o).map((p) => project(v, p));
+      ctx.beginPath(); points.forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath();
+      ctx.fillStyle = o.open ? '#ff9f4320' : o.kind === 'window' ? '#8fd3ff35' : '#b9824f60'; ctx.fill();
+      ctx.strokeStyle = o.open ? '#ffae5c' : o.kind === 'window' ? '#a2dcff' : '#d7a679'; ctx.lineWidth = 2;
+      ctx.setLineDash(o.open ? [5, 4] : []); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (app.view === 'slice') {
+      const axis = ['x', 'y', 'z'].indexOf(app.sliceAxis);
+      const other = [0, 1, 2].filter((n) => n !== axis), size = [w, l, h];
+      const corners = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([a, b]) => {
+        const p: Vec3 = [0, 0, 0]; p[axis] = size[axis] * app.sliceFraction;
+        p[other[0]] = a * size[other[0]]; p[other[1]] = b * size[other[1]]; return p;
+      });
+      for (let i = 0; i < 4; i++) line(corners[i], corners[(i + 1) % 4], '#ffc98c', 1.5);
+    }
+    for (const item of [...app.room.sources, ...app.room.probes]) {
+      ctx.setLineDash([3, 4]); line([item.x, item.y, 0], [item.x, item.y, item.z], '#f1f5f960'); ctx.setLineDash([]);
+      const p = project(v, [item.x, item.y, 0]); ctx.strokeStyle = '#d8e2f080'; ctx.beginPath(); ctx.ellipse(p.x, p.y, 5, 2.5, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (app.view === 'volume' && app.room.convection && app.showAirflow) {
+      if (airflowSim !== sim || (airflowElapsed !== sim.elapsed && now - airflowUpdated > 100)) {
+        airflowSim = sim; airflowElapsed = sim.elapsed; airflowUpdated = now;
+        const seeds: Vec3[] = [];
+        for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) {
+          seeds.push([w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)]);
+        }
+        // Extra seeds around each source reveal its plume and the returning circulation.
+        for (const source of app.room.sources) for (let i = 0; i < 12; i++) {
+          const angle = i * Math.PI / 6;
+          seeds.push([source.x + Math.cos(angle) * 0.18, source.y + Math.sin(angle) * 0.18,
+            Math.max(0.05, Math.min(h - 0.05, source.z + (source.kind === 'heat' ? 0.18 : -0.18)))]);
+        }
+        airflow = seeds.map((seed) => traceAirflow(sim, [w, l, h], seed)).filter((path) => path.length > 2);
+      }
+      ctx.lineCap = 'round';
+      for (let i = 0; i < airflow.length; i++) {
+        const path = airflow[i];
+        // Animated highlights indicate direction; their screen speed is for readability.
+        const head = (airflowPhase * 12 + i * 7.3) % (path.length + 8);
+        for (let j = 1; j < path.length; j++) {
+          const middle = path[j].map((n, axis) => (n + path[j - 1][axis]) / 2) as Vec3;
+          if (boxes.some((box) => intersectBox(middle, v.normal, box) !== null)) continue;
+          const age = head - j;
+          const highlight = age >= 0 && age < 7 ? 1 - age / 7 : 0;
+          const a = project(v, path[j - 1]), b = project(v, path[j]);
+          const rgb = paletteColor(app.palette, (sim.sample(...path[j]) - tMin) / (tMax - tMin));
+          ctx.strokeStyle = `rgba(${rgb.join(',')},${0.14 + 0.8 * highlight})`;
+          ctx.lineWidth = 1 + highlight * 1.6;
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        }
+      }
+      ctx.lineCap = 'butt';
+    }
+    ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = '#a9b7cc';
+    const text = (p: Vec3, label: string, dy: number) => { const q = project(v, p); ctx.fillText(label, q.x, q.y + dy); };
+    text([w / 2, l, 0], `X · ${w.toFixed(1)} m`, 25);
+    text([w, l / 2, 0], `Y · ${l.toFixed(1)} m`, 25);
+    text([0, 0, h], `Z · ${h.toFixed(1)} m`, -16);
+    // Orientation widget remains readable as the room rotates.
+    const origin = { x: 48, y: v.height - 65 };
+    for (const [axis, label, color] of [[0, 'X', '#f68f72'], [1, 'Y', '#8ed3a3'], [2, 'Z', '#80baff']] as const) {
+      const x = origin.x + v.right[axis] * 28, y = origin.y - v.up[axis] * 28;
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(x, y); ctx.stroke();
+      ctx.fillStyle = color; ctx.fillText(label, x + v.right[axis] * 9, y - v.up[axis] * 9 + 4);
     }
   }
 
   onMount(() => {
     renderer = createRenderer(canvas, app.palette);
-    let raf = 0;
-    let last = performance.now();
-    let lastStats = 0;
-    let dispMin = app.stats.tMin;
-    let dispMax = app.stats.tMax;
-
+    let raf = 0, last = performance.now(), lastStats = 0;
+    let dispMin = app.stats.tMin, dispMax = app.stats.tMax;
     const frame = (now: number) => {
-      const wallDt = Math.min(0.1, (now - last) / 1000);
-      last = now;
+      const wallDt = Math.min(0.1, (now - last) / 1000); last = now;
       if (app.running) {
-        sim.advance(wallDt * app.speed);
-        const values: Record<string, number> = { avg: sim.stats().mean };
-        for (const p of app.room.probes) values[`p${p.id}`] = sim.sample(p.x, p.y);
-        if (recorder.record(sim.elapsed, values)) app.graphTick++;
-      }
-
+        pendingSeconds = Math.min(60, pendingSeconds + wallDt * app.speed);
+        pendingSeconds -= sim.advance(pendingSeconds);
+      } else pendingSeconds = 0;
       const s = sim.stats();
-      const targetMin = Math.floor(s.min / 2) * 2;
-      const targetMax = Math.max(targetMin + 10, Math.ceil(s.max / 2) * 2);
-      dispMin += (targetMin - dispMin) * 0.1;
-      dispMax += (targetMax - dispMax) * 0.1;
-      renderer!.render(sim, dispMin, dispMax);
-
+      const targetMin = Math.floor(s.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(s.max / 2) * 2);
+      dispMin += (targetMin - dispMin) * 0.08; dispMax += (targetMax - dispMax) * 0.08;
+      transform = viewTransform(app.room, camera, canvas.clientWidth, canvas.clientHeight);
+      renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, temperatures: s,
+        furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
+      if (app.running) airflowPhase += wallDt;
+      drawOverlay(transform, dispMin, dispMax, now);
+      markers = [
+        ...app.room.sources.map((p) => ({ ...p, kind: 'source' as const, cold: p.kind === 'cold' })),
+        ...app.room.probes.map((p) => ({ ...p, kind: 'probe' as const, cold: false })),
+      ].map((p) => { const q = project(transform!, [p.x, p.y, p.z]); return { ...p, px: q.x, py: q.y }; });
+      openingMarkers = app.room.openings.map((o) => {
+        const corners = openingPoints(o); const mid = corners[0].map((n, i) => (n + corners[2][i]) / 2) as Vec3;
+        const p = project(transform!, mid); return { id: o.id, kind: o.kind, open: o.open, px: p.x, py: p.y };
+      });
+      furnitureMarkers = app.room.furniture.map((f) => {
+        const p = project(transform!, [f.x, f.y, f.heightM + 0.05]);
+        return { id: f.id, label: FURNITURE_PRESETS.find((item) => item.id === f.kind)!.label, px: p.x, py: p.y };
+      });
       if (now - lastStats > 200) {
         lastStats = now;
-        Object.assign(app.stats, {
-          elapsed: sim.elapsed,
-          min: s.min,
-          max: s.max,
-          mean: s.mean,
-          tMin: dispMin,
-          tMax: dispMax,
-        });
-        hover = hoverRaw
-          ? { px: hoverRaw.px, py: hoverRaw.py, temp: sim.sample(hoverRaw.x, hoverRaw.y) }
-          : null;
+        Object.assign(app.stats, { elapsed: sim.elapsed, min: s.min, max: s.max, mean: s.mean, tMin: dispMin, tMax: dispMax });
+        app.furnitureTemperatures = sim.furnitureTemperatures();
+        const values: Record<string, number> = { avg: s.mean };
+        for (const p of app.room.probes) values[`p${p.id}`] = sim.sample(p.x, p.y, p.z);
+        if (recorder.record(sim.elapsed, values)) app.graphTick++;
+        hover = null;
+        if (hoverRaw && !drag && !orbit) {
+          const axis = app.view === 'slice' ? ['x', 'y', 'z'].indexOf(app.sliceAxis) as 0 | 1 | 2 : 2;
+          const size = [app.room.widthM, app.room.heightM, app.room.ceilingM];
+          const p = pointOnPlane(transform, hoverRaw.px, hoverRaw.py, axis, size[axis] * app.sliceFraction);
+          if (p && p.every((n, i) => n >= 0 && n <= size[i])) hover = { ...hoverRaw, temp: sim.sample(...p), z: p[2] };
+        }
       }
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
-
-    const ro = new ResizeObserver(() => renderer?.resize());
-    ro.observe(canvas);
-    return () => {
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-      renderer?.dispose();
-    };
+    return () => { cancelAnimationFrame(raf); renderer?.dispose(); };
   });
-
-  const wallPx = $derived(3 + 30 * (app.room.wall.thicknessM + app.room.wall.insulationM));
-  const pct = (v: number, total: number) => `${(v / total) * 100}%`;
 </script>
 
 <div class="stage">
-  <div
-    class="room"
-    bind:this={roomEl}
-    style:--ar={app.room.widthM / app.room.heightM}
-    role="application"
-    aria-label="Room. Select a source or probe, then drag to place it."
-    onpointerdown={onPointerDown}
-    onpointermove={onPointerMove}
-    onpointerup={onPointerUp}
-    onpointercancel={onPointerUp}
-    onpointerleave={() => (hoverRaw = null)}
-  >
-    <canvas class="map" bind:this={canvas}></canvas>
-    <div class="walls" style:border-width="{wallPx}px"></div>
-
-    <svg
-      class="openings"
-      viewBox="0 0 {app.room.widthM} {app.room.heightM}"
-      preserveAspectRatio="none"
-      aria-hidden="true"
-    >
-      {#each app.room.openings as o (o.id)}
-        {@const seg = segment(o)}
-        {@const sel = app.selection?.kind === 'opening' && app.selection.id === o.id}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <g
-          class="opening {o.kind}"
-          class:open={o.open}
-          class:sel
-          onpointerdown={(e) => e.stopPropagation()}
-          onclick={(e) => toggleOpening(e, o.id, o.open)}
-        >
-          <line {...seg} class="hit" style:stroke-width="{wallPx + 10}px" />
-          <line {...seg} class="body" style:stroke-width="{wallPx + 2}px" />
-        </g>
-      {/each}
-    </svg>
-
-    {#each app.room.sources as s (s.id)}
-      <div
-        class="marker source {s.kind}"
-        class:dragging={drag?.kind === 'source' && drag.id === s.id}
-        class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}
-        style:left={pct(s.x, app.room.widthM)}
-        style:top={pct(s.y, app.room.heightM)}
-        role="slider"
-        tabindex="0"
-        aria-label="{s.kind === 'heat' ? 'Heat' : 'Cold'} source {s.id} position"
-        aria-valuetext="x {s.x.toFixed(1)} m, y {s.y.toFixed(1)} m"
-        aria-valuenow={s.x}
-        onpointerdown={(e) => startDrag(e, 'source', s.id)}
-        onfocus={() => select({ kind: 'source', id: s.id })}
-        onkeydown={(e) => onKey(e, 'source', s.id, s.x, s.y)}
-      ></div>
+  <div class="heading">
+    <span class="eyebrow">HEATFLOW / SPATIAL SIMULATION</span>
+    <h2>Your room, in 3D</h2>
+    <p>{app.room.widthM.toFixed(1)} × {app.room.heightM.toFixed(1)} × {app.room.ceilingM.toFixed(1)} m <span>·</span> {app.room.convection ? 'Buoyant airflow' : 'Thermal diffusion'}</p>
+  </div>
+  <div class="view-tools" aria-label="3D view controls">
+    <button class:active={app.view === 'volume'} onclick={() => (app.view = 'volume')}>Volume</button>
+    <button class:active={app.view === 'slice'} onclick={() => (app.view = 'slice')}>Slice</button>
+    <button onclick={() => zoom(1.15)} aria-label="Zoom in">＋</button>
+    <button onclick={() => zoom(1 / 1.15)} aria-label="Zoom out">−</button>
+    <button onclick={() => app.cameraToken++} aria-label="Reset camera">↺</button>
+  </div>
+  <div class="room" bind:this={roomEl} role="application" aria-label="3D room. Drag empty space to rotate; scroll to zoom. Drag furniture or sources to move; Shift-drag sources to change height. Arrow keys move selected markers, Page Up and Page Down change source height; R rotates furniture."
+    onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}
+    onpointerleave={() => { hoverRaw = null; hover = null; }} oncontextmenu={(e) => e.preventDefault()}
+    onwheel={(e) => { e.preventDefault(); zoom(Math.exp(-e.deltaY * 0.001)); }}>
+    <canvas class="map" bind:this={canvas} aria-hidden="true"></canvas>
+    <canvas class="overlay" bind:this={overlay} aria-hidden="true"></canvas>
+    {#each furnitureMarkers as f (f.id)}
+      <button class="furniture-marker" class:sel={app.selection?.kind === 'furniture' && app.selection.id === f.id}
+        style:left="{f.px}px" style:top="{f.py}px" aria-label="Furniture {f.label} {f.id}. Drag to move. Arrow keys move; R rotates."
+        onpointerdown={(e) => startDrag(e, 'furniture', f.id)} onfocus={() => select({ kind: 'furniture', id: f.id })}
+        onclick={() => select({ kind: 'furniture', id: f.id })} onkeydown={(e) => onFurnitureKey(e, f.id)}>↔</button>
     {/each}
-
-    {#each app.room.probes as p (p.id)}
-      <div
-        class="marker probe"
-        class:dragging={drag?.kind === 'probe' && drag.id === p.id}
-        class:sel={app.selection?.kind === 'probe' && app.selection.id === p.id}
-        style:left={pct(p.x, app.room.widthM)}
-        style:top={pct(p.y, app.room.heightM)}
-        role="slider"
-        tabindex="0"
-        aria-label="Probe {p.id} position"
-        aria-valuetext="x {p.x.toFixed(1)} m, y {p.y.toFixed(1)} m"
-        aria-valuenow={p.x}
-        onpointerdown={(e) => startDrag(e, 'probe', p.id)}
-        onfocus={() => select({ kind: 'probe', id: p.id })}
-        onkeydown={(e) => onKey(e, 'probe', p.id, p.x, p.y)}
-      >
-        <span>{p.id}</span>
-      </div>
+    {#each openingMarkers as o (o.id)}
+      <button class="opening-marker" class:open={o.open} style:left="{o.px}px" style:top="{o.py}px"
+        aria-label="{o.kind} {o.id}: {o.open ? 'open' : 'closed'}. Toggle opening." aria-pressed={o.open}
+        onpointerdown={(e) => e.stopPropagation()} onclick={() => { select({ kind: 'opening', id: o.id }); updateOpening(o.id, { open: !o.open }); }}>
+        {o.open ? '↗' : '▤'}
+      </button>
     {/each}
-
-    {#if app.room.convection}
-      <div class="badge" aria-hidden="true">Side view ↑ up</div>
-    {/if}
+    {#each markers as m (`${m.kind}${m.id}`)}
+      <button class="marker" class:probe={m.kind === 'probe'} class:cold={m.cold}
+        class:sel={app.selection?.kind === m.kind && app.selection.id === m.id}
+        style:left="{m.px}px" style:top="{m.py}px"
+        aria-label="{m.kind === 'probe' ? 'Probe' : m.cold ? 'Cold source' : 'Heat source'} {m.id}. X {m.x.toFixed(1)}, Y {m.y.toFixed(1)}, height {m.z.toFixed(1)} metres."
+        onpointerdown={(e) => startDrag(e, m.kind, m.id)} onkeydown={(e) => onKey(e, m)} onfocus={() => select({ kind: m.kind, id: m.id })} onclick={() => select({ kind: m.kind, id: m.id })}>
+        {m.kind === 'probe' ? m.id : m.cold ? '−' : '+'}
+      </button>
+    {/each}
     {#if hover}
-      <div class="tip" style:left="{hover.px}px" style:top="{hover.py}px">
-        {hover.temp.toFixed(1)} °C
-      </div>
+      <div class="tip" style:left="{hover.px}px" style:top="{hover.py}px">{hover.temp.toFixed(1)} °C <span>at {hover.z.toFixed(1)} m</span></div>
     {/if}
   </div>
+  <div class="view-caption"><span class="live" class:paused={!app.running}></span>{app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
+  <p class="instructions">Drag empty space to rotate <span>·</span> Scroll to zoom <span>·</span> Drag furniture or sources to move <span>·</span> Shift-drag sources to lift</p>
 </div>
 
 <style>
-  .stage {
-    container-type: size;
-    display: grid;
-    place-items: center;
-    min-height: 0;
-    min-width: 0;
-    padding: 16px;
-    box-sizing: border-box;
-  }
-  .room {
-    position: relative;
-    aspect-ratio: var(--ar);
-    width: min(100cqw, calc(100cqh * var(--ar)));
-    touch-action: none;
-    cursor: crosshair;
-    user-select: none;
-    background: #111;
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  }
-  canvas.map {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    display: block;
-  }
-  .walls {
-    position: absolute;
-    inset: 0;
-    box-sizing: border-box;
-    border-style: solid;
-    border-color: rgba(245, 245, 250, 0.85);
-    pointer-events: none;
-    transition: border-width 0.15s;
-  }
-  .openings {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    overflow: visible;
-  }
-  .opening {
-    pointer-events: auto;
-    cursor: pointer;
-  }
-  .opening line {
-    vector-effect: non-scaling-stroke;
-    stroke-linecap: butt;
-  }
-  .opening .hit {
-    stroke: transparent;
-  }
-  .window .body {
-    stroke: #8fd3ff;
-  }
-  .door .body {
-    stroke: #b9824f;
-  }
-  .opening.open .body {
-    stroke-dasharray: 4 6;
-    stroke: #ff9f43;
-  }
-  .opening.sel .body {
-    filter: drop-shadow(0 0 4px #5aa9ff);
-  }
-  .marker {
-    position: absolute;
-    width: 28px;
-    height: 28px;
-    margin: -14px 0 0 -14px;
-    border-radius: 50%;
-    border: 2px solid #fff;
-    cursor: grab;
-    touch-action: none;
-  }
-  .marker.sel {
-    outline: 2px solid #fff;
-    outline-offset: 3px;
-  }
-  .marker.dragging {
-    cursor: grabbing;
-    transform: scale(1.15);
-  }
-  .marker:focus-visible {
-    outline: 3px solid #5aa9ff;
-    outline-offset: 3px;
-  }
-  .source.heat {
-    background: radial-gradient(circle, #fff 0 25%, #ff5a1f 26% 60%, rgba(255, 90, 31, 0.3) 61%);
-    box-shadow: 0 0 12px rgba(255, 120, 40, 0.9);
-  }
-  .source.cold {
-    background: radial-gradient(circle, #fff 0 25%, #2f8bff 26% 60%, rgba(47, 139, 255, 0.3) 61%);
-    box-shadow: 0 0 12px rgba(60, 150, 255, 0.9);
-  }
-  .probe {
-    width: 20px;
-    height: 20px;
-    margin: -10px 0 0 -10px;
-    border-radius: 4px;
-    background: rgba(20, 22, 28, 0.85);
-    display: grid;
-    place-items: center;
-    font-size: 12px;
-    font-weight: 700;
-  }
-  .badge {
-    position: absolute;
-    right: 8px;
-    bottom: 8px;
-    padding: 2px 8px;
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.6);
-    font-size: 12px;
-    pointer-events: none;
-  }
-  .tip {
-    position: absolute;
-    transform: translate(12px, -140%);
-    padding: 2px 8px;
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.75);
-    color: #fff;
-    font-size: 13px;
-    pointer-events: none;
-    white-space: nowrap;
-  }
+  .stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: radial-gradient(ellipse at 50% 50%, #222b3b 0, #151b26 52%, #11151d 100%); }
+  .heading { position: absolute; top: 30px; left: 32px; z-index: 2; pointer-events: none; }
+  .eyebrow { color: #8e9eb4; font-size: 10px; letter-spacing: 0.17em; }
+  h2 { margin: 8px 0; font-size: 25px; font-weight: 500; letter-spacing: -0.03em; }
+  .heading p { margin: 0; color: #91a0b6; font-size: 12px; }
+  .heading p span, .instructions span, .view-caption > span:not(.live) { margin: 0 8px; color: #536179; }
+  .room { position: absolute; inset: 110px 0 70px; touch-action: none; cursor: grab; user-select: none; }
+  .room:active { cursor: grabbing; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+  .view-tools { position: absolute; top: 30px; right: 24px; z-index: 3; display: flex; gap: 3px; padding: 4px; background: #1b2431d9; border: 1px solid #334055; border-radius: 9px; }
+  .view-tools button { border: none; background: transparent; color: #9aabc0; padding: 7px 10px; border-radius: 5px; cursor: pointer; font: inherit; font-size: 12px; min-height: 32px; }
+  .view-tools button.active { background: #384457; color: #fff; }
+  .view-tools button:hover { background: #303d51; color: #fff; }
+  .marker { position: absolute; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff0d7; background: #ff7432; color: white; box-shadow: 0 0 25px #ff6e3260, 0 2px 7px #0008; cursor: grab; touch-action: none; font: 600 18px system-ui; display: grid; place-items: center; padding: 0; }
+  .marker.cold { background: #3c95f4; border-color: #e4f2ff; box-shadow: 0 0 25px #449bff70; }
+  .marker.probe { width: 24px; height: 24px; border-radius: 6px; background: #151c2cee; border-color: #e4e9ff; font-size: 12px; box-shadow: 0 2px 8px #0008; }
+  .marker.sel { outline: 2px solid #fff9; outline-offset: 4px; }
+  .furniture-marker { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 22px; border-radius: 5px; border: 1px solid #e5c4a099; background: #251f1bdd; color: #f5d3ad; cursor: grab; padding: 0; touch-action: none; }
+  .furniture-marker.sel { outline: 2px solid #efbe83; outline-offset: 3px; }
+  button:focus-visible { outline: 2px solid #89c8ff; outline-offset: 4px; }
+  .opening-marker { position: absolute; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 5px; background: #162a3bbb; border: 1px solid #a2dcff99; color: #c4e9ff; cursor: pointer; }
+  .opening-marker.open { color: #ffbc76; border-color: #ffbc76; }
+  .tip { position: absolute; transform: translate(14px, -140%); padding: 6px 10px; border: 1px solid #3e4b60; border-radius: 6px; background: #101723ed; color: #fff; font-size: 13px; pointer-events: none; white-space: nowrap; }
+  .tip span { color: #9cacc2; font-size: 11px; margin-left: 6px; }
+  .view-caption { position: absolute; bottom: 56px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; font-size: 12px; color: #b5c2d3; white-space: nowrap; pointer-events: none; }
+  .live { width: 6px; height: 6px; border-radius: 50%; background: #78cfaa; margin-right: 8px; box-shadow: 0 0 8px #78cfaa55; }
+  .live.paused { background: #e1b46f; }
+  .instructions { position: absolute; left: 20px; right: 20px; bottom: 13px; margin: 0; font-size: 11px; color: #74849d; text-align: center; pointer-events: none; }
+  @media (max-width: 1150px) { .view-tools { top: 112px; right: 15px; } .room { inset: 145px 0 75px; } }
+  @media (max-width: 800px) { .heading { top: 14px; left: 18px; } h2 { font-size: 20px; margin: 4px 0; } .eyebrow { font-size: 9px; } .heading p { font-size: 10px; } .view-tools { top: 14px; right: 12px; } .view-tools button { padding: 5px 7px; } .room { inset: 80px 0 36px; } .view-caption { bottom: 20px; font-size: 10px; } .instructions { display: none; } }
+  @media (max-width: 550px) { .heading p { display: none; } .heading h2 { font-size: 17px; } .view-tools { top: 57px; right: 12px; } .room { inset: 88px 0 30px; } .view-caption { bottom: 10px; } }
 </style>
