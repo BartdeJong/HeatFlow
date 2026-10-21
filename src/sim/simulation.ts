@@ -69,9 +69,10 @@ function bilerp(f: Float32Array, w: number, h: number, fx: number, fy: number): 
 
 /**
  * 2D explicit finite-difference heat model of a room.
- * Heat is injected or removed by point sources and exchanged with the outside through the
- * perimeter (walls, windows and doors). With convection enabled, a buoyancy-driven flow field
- * (stable-fluids solver on a staggered grid) carries heat upward; screen-up is "up".
+ * Heat is injected by point or underfloor sources, removed by point cold sources, and exchanged
+ * with the outside through the perimeter (walls, windows and doors). With convection enabled, a
+ * buoyancy-driven flow field (stable-fluids solver on a staggered grid) carries heat upward;
+ * screen-up is "up".
  */
 export class Simulation {
   readonly nx: number;
@@ -158,6 +159,13 @@ export class Simulation {
     const radius = Math.max(0.15, 1.5 * this.dx);
     this.sources = this.room.sources.map((s) => {
       const cells: number[] = [];
+      if (s.kind === 'heat' && this.room.heatingMode === 'underfloor') {
+        for (let x = 0; x < this.nx; x++) cells.push((this.ny - 1) * this.nx + x);
+        return {
+          cells: Int32Array.from(cells),
+          watts: s.powerKW * 1000,
+        };
+      }
       let best = 0;
       let bestD = Infinity;
       for (let y = 0; y < this.ny; y++) {

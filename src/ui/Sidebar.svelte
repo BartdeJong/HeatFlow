@@ -33,6 +33,7 @@
     wallLength,
     wallU,
     type InsulationId,
+    type HeatingMode,
     type RoofMaterialId,
     type WallMaterialId,
     type WallSide,
@@ -298,6 +299,19 @@
 
   <fieldset>
     <legend>Sources</legend>
+    <label>
+      Heating delivery
+      <select
+        value={app.room.heatingMode}
+        onchange={(e) => updateRoom({ heatingMode: e.currentTarget.value as HeatingMode })}
+      >
+        <option value="point">Point source</option>
+        <option value="underfloor">Underfloor heating</option>
+      </select>
+    </label>
+    {#if app.room.heatingMode === 'underfloor'}
+      <p class="hint">Heat sources distribute their full output evenly along the floor; their position is ignored. Cold sources remain point-based.</p>
+    {/if}
     <div class="row">
       <button onclick={() => addSource('heat')} disabled={app.room.sources.length >= LIMITS.sources}>
         + Heat
@@ -311,7 +325,7 @@
         <li class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}>
           <button class="item" onclick={() => select({ kind: 'source', id: s.id })}>
             <span class="dot {s.kind}"></span>
-            {s.kind === 'heat' ? 'Heat' : 'Cold'} {s.id} · {s.powerKW.toFixed(1)} kW
+            {s.kind === 'cold' ? 'Cold' : app.room.heatingMode === 'underfloor' ? 'Underfloor' : 'Heat'} {s.id} · {s.powerKW.toFixed(1)} kW
           </button>
           <button onclick={() => removeSource(s.id)} aria-label="Remove source {s.id}">🗑</button>
         </li>

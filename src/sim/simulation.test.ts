@@ -58,6 +58,43 @@ describe('Simulation', () => {
     expect(sim.energyJ() - e0).toBeCloseTo(2500 * t, -2);
   });
 
+  it('distributes underfloor heat along the floor and ignores heat-source position', () => {
+    const sources = (x: number) => [{ id: 1, kind: 'heat' as const, x, y: 0.5, powerKW: 1 }];
+    const base = { ...room({ furniture: [], outsideC: 20 }), heatingMode: 'underfloor' as const };
+    const left = new Simulation({ ...base, sources: sources(0.5) }, { ...DEFAULT_PHYSICS, uScale: 0 });
+    const right = new Simulation({ ...base, sources: sources(4.5) }, { ...DEFAULT_PHYSICS, uScale: 0 });
+    const energyBefore = left.energyJ();
+    const advanced = left.advance(5);
+    right.advance(5);
+    expect(Array.from(left.T)).toEqual(Array.from(right.T));
+    expect(left.sample(4.5, 2.45)).toBeGreaterThan(20);
+    expect(left.energyJ() - energyBefore).toBeCloseTo(1000 * advanced, -1);
+
+    const pointLeft = new Simulation(
+      { ...base, heatingMode: 'point', sources: sources(0.5) },
+      { ...DEFAULT_PHYSICS, uScale: 0 },
+    );
+    const pointRight = new Simulation(
+      { ...base, heatingMode: 'point', sources: sources(4.5) },
+      { ...DEFAULT_PHYSICS, uScale: 0 },
+    );
+    pointLeft.advance(5);
+    pointRight.advance(5);
+    expect(Array.from(pointLeft.T)).not.toEqual(Array.from(pointRight.T));
+
+    const coldLeft = new Simulation(
+      { ...base, sources: sources(0.5).map((source) => ({ ...source, kind: 'cold' as const })) },
+      { ...DEFAULT_PHYSICS, uScale: 0 },
+    );
+    const coldRight = new Simulation(
+      { ...base, sources: sources(4.5).map((source) => ({ ...source, kind: 'cold' as const })) },
+      { ...DEFAULT_PHYSICS, uScale: 0 },
+    );
+    coldLeft.advance(5);
+    coldRight.advance(5);
+    expect(Array.from(coldLeft.T)).not.toEqual(Array.from(coldRight.T));
+  });
+
   it('a cold source cools the room below the starting temperature', () => {
     const sim = new Simulation(room({ sources: withPower(2, 'cold'), outsideC: 20 }));
     sim.advance(120);

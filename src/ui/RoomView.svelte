@@ -62,8 +62,17 @@
   }
 
   function move(kind: 'source' | 'probe' | 'furniture', id: number, x: number, y: number) {
+    if (!canMove(kind, id)) return;
     moveItem(kind, id, x, y);
     if (kind === 'probe') recorder.clearSeries(`p${id}`);
+  }
+
+  function canMove(kind: 'source' | 'probe' | 'furniture', id: number): boolean {
+    return !(
+      kind === 'source' &&
+      app.room.heatingMode === 'underfloor' &&
+      app.room.sources.some((source) => source.id === id && source.kind === 'heat')
+    );
   }
 
   function startDrag(e: PointerEvent, kind: 'source' | 'probe' | 'furniture', id: number) {
@@ -77,7 +86,7 @@
 
   function onPointerDown(e: PointerEvent) {
     const sel = app.selection;
-    if (!sel || sel.kind === 'opening') return;
+    if (!sel || sel.kind === 'opening' || !canMove(sel.kind, sel.id)) return;
     roomEl.setPointerCapture(e.pointerId);
     drag = { kind: sel.kind, id: sel.id };
     dragOffsetX = 0;
@@ -560,6 +569,33 @@
       </svg>
     {/if}
 
+    {#if app.room.heatingMode === 'underfloor'}
+      <svg
+        class="underfloor"
+        viewBox="0 0 {app.room.widthM} {app.room.ceilingM}"
+        preserveAspectRatio="none"
+        role="img"
+        aria-label="Underfloor heating distributes heat across the floor"
+      >
+        <rect
+          x="0"
+          y={app.room.ceilingM - 0.055}
+          width={app.room.widthM}
+          height=".055"
+          fill="#ffb454"
+          fill-opacity=".88"
+        />
+        <line
+          x1="0"
+          y1={app.room.ceilingM - 0.0275}
+          x2={app.room.widthM}
+          y2={app.room.ceilingM - 0.0275}
+          stroke="#fff0ce"
+          stroke-width=".012"
+        />
+      </svg>
+    {/if}
+
     <svg
       class="furniture"
       viewBox="0 0 {app.room.widthM} {app.room.ceilingM}"
@@ -597,21 +633,23 @@
     </svg>
 
     {#each app.room.sources as s (s.id)}
-      <div
-        class="marker source {s.kind}"
-        class:dragging={drag?.kind === 'source' && drag.id === s.id}
-        class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}
-        style:left={pct(s.x, app.room.widthM)}
-        style:top={pct(s.y, app.room.ceilingM)}
-        role="slider"
-        tabindex="0"
-        aria-label="{s.kind === 'heat' ? 'Heat' : 'Cold'} source {s.id} position"
-        aria-valuetext="x {s.x.toFixed(1)} m, y {s.y.toFixed(1)} m"
-        aria-valuenow={s.x}
-        onpointerdown={(e) => startDrag(e, 'source', s.id)}
-        onfocus={() => select({ kind: 'source', id: s.id })}
-        onkeydown={(e) => onKey(e, 'source', s.id, s.x, s.y)}
-      ></div>
+      {#if canMove('source', s.id)}
+        <div
+          class="marker source {s.kind}"
+          class:dragging={drag?.kind === 'source' && drag.id === s.id}
+          class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}
+          style:left={pct(s.x, app.room.widthM)}
+          style:top={pct(s.y, app.room.ceilingM)}
+          role="slider"
+          tabindex="0"
+          aria-label="{s.kind === 'heat' ? 'Heat' : 'Cold'} source {s.id} position"
+          aria-valuetext="x {s.x.toFixed(1)} m, y {s.y.toFixed(1)} m"
+          aria-valuenow={s.x}
+          onpointerdown={(e) => startDrag(e, 'source', s.id)}
+          onfocus={() => select({ kind: 'source', id: s.id })}
+          onkeydown={(e) => onKey(e, 'source', s.id, s.x, s.y)}
+        ></div>
+      {/if}
     {/each}
 
     {#each app.room.probes as p (p.id)}
@@ -703,6 +741,7 @@
     overflow: visible;
   }
   .vectors,
+  .underfloor,
   .furniture {
     position: absolute;
     inset: 0;

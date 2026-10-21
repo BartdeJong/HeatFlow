@@ -5,6 +5,7 @@ import {
   sanitizeRoom,
   type HeatSource,
   type FurnitureKind,
+  type HeatingMode,
   type Opening,
   type OpeningKind,
   type RoofConfig,
@@ -62,7 +63,7 @@ function edit(fn: (room: RoomConfig) => void): void {
 }
 
 export function updateRoom(
-  patch: Partial<Pick<RoomConfig, 'widthM' | 'heightM' | 'ceilingM' | 'outsideC' | 'convection'>>,
+  patch: Partial<Pick<RoomConfig, 'widthM' | 'heightM' | 'ceilingM' | 'outsideC' | 'convection' | 'heatingMode'>>,
 ): void {
   edit((r) => Object.assign(r, patch));
 }

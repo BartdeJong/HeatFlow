@@ -11,6 +11,7 @@ const full: RoomConfig = {
   wall: { material: 'wood', thicknessM: 0.15, insulation: 'pir', insulationM: 0.08 },
   roof: { pitchDeg: 48, insulationM: 0.22, material: 'slate' },
   thermostat: { enabled: true, targetC: 21.5, deadbandC: 0.8 },
+  heatingMode: 'underfloor',
   furniture: [
     { id: 1, kind: 'sofa', x: 1.6 },
     { id: 2, kind: 'table', x: 4.2 },
@@ -57,6 +58,7 @@ describe('share', () => {
     const room = decodeRoom(code)!;
     expect(room.thermostat).toEqual(DEFAULT_ROOM.thermostat);
     expect(room.furniture).toEqual(DEFAULT_ROOM.furniture);
+    expect(room.heatingMode).toBe('point');
   });
 
   it('rejects garbage', () => {

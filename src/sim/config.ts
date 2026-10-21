@@ -1,6 +1,7 @@
 export type WallMaterialId = 'brick' | 'concrete' | 'wood' | 'aerated';
 export type InsulationId = 'mineral' | 'eps' | 'pir';
 export type SourceKind = 'heat' | 'cold';
+export type HeatingMode = 'point' | 'underfloor';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
 export type RoofMaterialId = 'tiles' | 'slate' | 'metal' | 'thatch';
@@ -64,7 +65,8 @@ export interface Probe {
 
 /**
  * The room is shown and simulated as a side section: x is the width, y is the height
- * (floor at the bottom, ceiling at the top). Sources, probes and openings live in that section.
+ * (floor at the bottom, ceiling at the top). Sources, probes and openings live in that section;
+ * underfloor mode distributes heat sources across the floor instead of using their positions.
  */
 export interface RoomConfig {
   widthM: number;
@@ -79,6 +81,7 @@ export interface RoomConfig {
   wall: WallConfig;
   roof: RoofConfig;
   thermostat: ThermostatConfig;
+  heatingMode: HeatingMode;
   furniture: FurnitureItem[];
   sources: HeatSource[];
   openings: Opening[];
@@ -215,6 +218,7 @@ export const DEFAULT_ROOM: RoomConfig = {
   wall: DEFAULT_WALL,
   roof: DEFAULT_ROOF,
   thermostat: DEFAULT_THERMOSTAT,
+  heatingMode: 'point',
   furniture: defaultFurniture(5),
   sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2.0, powerKW: 1.54 }],
   openings: [],
@@ -427,6 +431,7 @@ export function sanitizeRoom(
     wall: sanitizeWall(c.wall),
     roof: sanitizeRoof(c.roof),
     thermostat: sanitizeThermostat(c.thermostat),
+    heatingMode: pick(c.heatingMode, ['point', 'underfloor'], 'point'),
     furniture,
     sources,
     openings,

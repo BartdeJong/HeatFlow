@@ -69,6 +69,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Heat-loss and energy accounting (live roof/walls/floor/openings loss, plus cumulative heating and cooling energy)
 - ✅ Heat-flow vector arrows (toggleable overlay using simulated temperature gradients and convection)
 - ✅ Thermally active furniture (default sofa and table; draggable, with furniture heat capacity included in energy balance)
+- ✅ Switchable point-source / underfloor heating (heating power spreads across the floor; cold sources remain point-based)
 - ⬜ Not done yet: other roof shapes (hip, flat), garage/porch
 
 ## Add-later (all ⬜)

@@ -47,6 +47,7 @@ export function encodeRoom(room: RoomConfig): string {
     r(room.thermostat.targetC),
     r(room.thermostat.deadbandC),
     room.furniture.map((f) => [FURNITURE_KINDS.indexOf(f.kind), r(f.x)]),
+    room.heatingMode === 'underfloor' ? 1 : 0,
   ];
   const b64 = btoa(JSON.stringify(arr));
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -75,7 +76,7 @@ export function decodeRoom(code: string): RoomConfig | null {
       return legacyRoom(w, h, p, u, sx, sy);
     }
 
-    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 20) return null;
+    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 21) return null;
     const head = arr.slice(1, 8);
     if (!allNums(head)) return null;
     const [widthM, heightM, conv, mat, thick, ins, insM] = head as number[];
@@ -93,6 +94,7 @@ export function decodeRoom(code: string): RoomConfig | null {
       | [];
     const furnitureRows = arr.length > 19 ? rows(arr[19], 2) : null;
     if (arr.length > 19 && !furnitureRows) return null;
+    if (arr.length > 20 && !isNum(arr[20])) return null;
 
     return sanitizeRoom({
       widthM,
@@ -105,6 +107,7 @@ export function decodeRoom(code: string): RoomConfig | null {
         targetC: thermostatTargetC,
         deadbandC: thermostatDeadbandC,
       },
+      heatingMode: arr[20] === 1 ? 'underfloor' : 'point',
       convection: conv === 1,
       wall: {
         material: WALL_MATERIALS[mat]?.id,
