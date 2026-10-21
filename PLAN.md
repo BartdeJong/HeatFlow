@@ -1,4 +1,6 @@
-# HeatFlow MVP Plan
+# HeatFlow MVP Plan (historical)
+
+The original 2D MVP below is complete. The current implementation uses a 3D finite-volume grid, 3D buoyancy and volumetric rendering; see README.md for the current model and controls, and FEATURES.md for current status.
 
 Stack: Vite + Svelte + TypeScript, WebGL heatmap, calibrated physics, static hosting.
 Progress is tracked in [FEATURES.md](./FEATURES.md).

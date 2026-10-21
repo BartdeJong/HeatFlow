@@ -4,7 +4,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 
 ## Tech decisions
 - Vite + Svelte 5 + TypeScript
-- WebGL2 rendering (R16F texture + palette shader), Canvas2D fallback
+- WebGL2 3D texture volume rendering + palette shader, projected Canvas2D fallback
 - Physically calibrated units (m, °C, W, W/m²K)
 - Static hosting (GitHub Pages workflow in `.github/workflows/deploy.yml`)
 
@@ -13,9 +13,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 ### Core simulation
 - ✅ Single heat source (drag-and-drop point source; also keyboard arrows)
 - ✅ Adjustable heat source output (kW)
-- ✅ 2D room geometry, adjustable width/height (2–10 m)
+- ✅ 3D room geometry, adjustable width, length and ceiling height (2–10 m)
 - ✅ Walls with a uniform insulation value (now derived from material + insulation layers)
-- ✅ 2D grid thermal diffusion model (explicit finite difference, stable dt, unit-tested)
+- ✅ 3D grid thermal diffusion model (finite volume, stable dt, unit-tested)
 - ✅ Real-time heatmap (smooth, bilinear-filtered gradient with adaptive scale)
 
 ### Controls
@@ -27,7 +27,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Hover temperature readout + legend (extra)
 
 ### UI & interaction
-- ✅ Clean 2D canvas
+- ✅ Rotatable 3D room, zoom, temperature volume and X/Y/Z slices
 - ✅ Sidebar with grouped controls
 - ✅ Efficient WebGL rendering
 - ✅ Basic mobile support (stacked layout, touch drag, large targets)
@@ -42,12 +42,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ⬜ Real-device mobile performance check
 
 ## Known limitations
-- Convection is a simplified 2D side-section model (coarser 64-cell grid, not CFD); toggling it restarts the simulation.
+- Convection is a simplified 3D buoyancy model (20 cells along the longest dimension, not full CFD); toggling it restarts the simulation.
+- Floor and ceiling use the wall construction and outside temperature; separate ground/roof boundary conditions are not modelled.
 - Cold sources are plain heat sinks (AC / draught) with no thermostat setpoint.
 - Open windows/doors are modelled as a high loss coefficient, not real airflow.
 - Palette choice is not saved or shared.
 - Room starts at 20 °C; outside temperature is adjustable (−30…40 °C) but constant over time.
 - Changing room size restarts the simulation.
+- Furniture changes restart the simulation. Solid parts use coarse voxels, so thin parts expand to grid cells and narrow gaps can close.
 
 ## Added after the MVP
 - ✅ Windows & doors with open/closed state (click them on the wall or use the sidebar)
@@ -57,16 +59,21 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Convective airflow (hot air rises; buoyancy + pressure projection)
 - ✅ Thermal camera palette
 - ✅ Overlay graph: temperature over time (room average + up to 3 draggable probes)
-- ✅ Share/save format v2 (old links and saves still load)
+- ✅ Share/save format v4, including furniture, source/probe Z coordinates and opening height/sill (old links and saves still load)
 - ✅ Real-time (1×) and 10× simulation speeds
 - ✅ Adjustable room length, width and ceiling height
 - ✅ Adjustable outside temperature
+- ✅ Heat loss through all six faces, with exact rectangular opening areas
+- ✅ 3D source/probe positioning: drag, Shift-drag height, keyboard and coordinate sliders
+- ✅ Energy-conserving 3D convection with buoyancy along Z
+- ✅ Interior heat clouds and temperature-coloured airflow trails following the simulated 3D velocity field
+- ✅ Placeable, resizable, rotatable sofas, tables, cabinets and beds, with wood/upholstery/metal materials
+- ✅ Furniture redirects airflow, stores heat and exchanges it with air; combined thermal energy is conserved
+- ✅ Furniture temperature readouts and geometry shared by physics, rendering, picking and trail occlusion
 
 ## Add-later (all ⬜)
 - Humidity & moisture
-- 3D simulation
 - Custom room shapes / multi-room
-- Furniture
 - Multi-floor
 - Vector field arrows
 - Time-lapse playback
