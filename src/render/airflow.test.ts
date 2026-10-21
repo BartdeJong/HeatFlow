@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { DEFAULT_ROOM } from '../sim/config';
 import { Simulation } from '../sim/simulation';
-import { traceAirflow } from './airflow';
+import { AirflowTrails, airflowHighlight, traceAirflow } from './airflow';
 
 it('shows no airflow in still air', () => {
   const sim = new Simulation({ ...DEFAULT_ROOM, convection: true, sources: [], outsideC: 20 });
@@ -35,3 +35,54 @@ it('follows simulated buoyancy above a heater and resets with the simulation', (
   expect(sim.sampleVelocity(...seed)).toEqual([0, 0, 0]);
 });
 
+it('crossfades rapid flow reversals and temperature changes in wall time', () => {
+  let direction = 1, temperature = 30;
+  const field = { sampleVelocity: (): [number, number, number] => [0, 0, direction], sample: () => temperature };
+  const trails = new AirflowTrails();
+  const seeds: [number, number, number][] = [[2, 2, 1]];
+  trails.update(field, [5, 4, 2.5], seeds, 1, 0);
+  trails.update(field, [5, 4, 2.5], seeds, 1, 0.25);
+  const rising = trails.layers[1].trails;
+  direction = -1; temperature = 50;
+  trails.update(field, [5, 4, 2.5], seeds, 1000, 0);
+  expect(trails.layers[0]).toEqual({ trails: rising, opacity: 1 });
+  expect(trails.layers[1].opacity).toBe(0);
+  trails.update(field, [5, 4, 2.5], seeds, 2000, 0.125);
+  expect(trails.layers.map((l) => l.opacity)).toEqual([0.5, 0.5]);
+  expect(trails.layers[0].trails[0].temperatures[0]).toBe(30);
+  expect(trails.layers[1].trails[0].temperatures[0]).toBe(50);
+  expect(trails.layers[1].trails[0].points.at(-1)![2]).toBeLessThan(1);
+  const paused = structuredClone(trails.layers);
+  trails.update(field, [5, 4, 2.5], seeds, 2000, 0);
+  expect(trails.layers).toEqual(paused);
+});
+
+it('keeps seed identities when a path is blocked and clears history on reset', () => {
+  const trails = new AirflowTrails();
+  const field = { sampleVelocity: (): [number, number, number] => [0, 0, 1], sample: () => 20,
+    isSolid: (x: number, _y: number, z: number) => x < 1 || z > 1.5 };
+  trails.update(field, [5, 4, 2.5], [[0.5, 2, 1], [2, 2, 1]], 100, 0);
+  const paths = trails.layers[1].trails;
+  expect(paths).toHaveLength(2);
+  expect(paths[0].points).toHaveLength(0);
+  expect(paths[1].points.length).toBeGreaterThan(2);
+  expect(paths[1].points.every((p) => !field.isSolid(...p))).toBe(true);
+  trails.update(field, [5, 4, 2.5], [], 0, 0);
+  expect(trails.layers.every((l) => l.trails.length === 0)).toBe(true);
+  expect(trails.phase).toBe(0);
+});
+
+it('uses the same fade and pulse timing at different frame rates and simulation speeds', () => {
+  const field = { sampleVelocity: (): [number, number, number] => [0, 0, 1], sample: () => 20 };
+  const make = (frames: number, speed: number) => {
+    const trails = new AirflowTrails();
+    trails.update(field, [5, 4, 2.5], [[2, 2, 1]], 1, 0);
+    for (let i = 1; i <= frames; i++) trails.update(field, [5, 4, 2.5], [[2, 2, 1]], 1 + i * speed, 0.125 / frames);
+    return trails;
+  };
+  const a = make(4, 1), b = make(15, 1000);
+  expect(a.layers[1].opacity).toBeCloseTo(b.layers[1].opacity);
+  expect(airflowHighlight(a.phase, 3, 10)).toBeCloseTo(airflowHighlight(b.phase, 3, 10));
+  // Pulse wraps continuously, without the previous hard on/off leading edge.
+  expect(airflowHighlight(44 / 12 - 0.00001, 0, 0)).toBeCloseTo(airflowHighlight(44 / 12 + 0.00001, 0, 0));
+});

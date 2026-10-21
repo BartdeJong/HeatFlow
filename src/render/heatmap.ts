@@ -11,6 +11,7 @@ export interface RenderView {
   axis: 'x' | 'y' | 'z';
   fraction: number;
   temperatures?: { min: number; max: number; mean: number };
+  temperatureField?: { T: Float32Array; sample(x: number, y: number, z: number): number };
   furniture?: Furniture[];
   selectedFurnitureId?: number;
 }
@@ -179,7 +180,8 @@ function createWebGLRenderer(canvas: HTMLCanvasElement, palette: PaletteId): Hea
       gl.viewport(0, 0, canvas.width, canvas.height);
       if (bytes.length !== sim.T.length) bytes = new Uint8Array(sim.T.length);
       const span = tMax - tMin || 1;
-      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.max(0, Math.min(255, Math.round(255 * (sim.T[i] - tMin) / span)));
+      const field = view.temperatureField ?? sim;
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.max(0, Math.min(255, Math.round(255 * (field.T[i] - tMin) / span)));
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, temp);
       const key = `${sim.nx}|${sim.ny}|${sim.nz}`;
       if (grid !== key) {
@@ -252,7 +254,7 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
         };
         const p = point(i + 0.5, j + 0.5);
         if (sim.isSolid(...p)) continue;
-        const temp = sim.sample(...p);
+        const temp = (view.temperatureField ?? sim).sample(...p);
         const rgb = paletteColor(palette, (temp - tMin) / (tMax - tMin || 1));
         const contrast = Math.abs(temp - mean) / Math.max(0.5, temp >= mean ? max - mean : mean - min);
         const alpha = view.mode === 'slice' ? 0.96 : Math.min(0.65, Math.max(0, contrast - 0.04) ** 1.5 * 0.8);

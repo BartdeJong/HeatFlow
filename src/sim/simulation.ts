@@ -8,7 +8,7 @@ const FLOW_SECONDS = 1;
 const PRESSURE_ITERATIONS = 24;
 
 /** Trilinear sampling of a cell-centred 3D grid. */
-function trilerp(f: Float32Array, nx: number, ny: number, nz: number, x: number, y: number, z: number): number {
+export function trilerp(f: Float32Array, nx: number, ny: number, nz: number, x: number, y: number, z: number): number {
   x = Math.max(0, Math.min(nx - 1, x));
   y = Math.max(0, Math.min(ny - 1, y));
   z = Math.max(0, Math.min(nz - 1, z));

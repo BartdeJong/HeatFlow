@@ -2,7 +2,8 @@
   import { onMount, untrack } from 'svelte';
   import { createRenderer, fitCanvas, type HeatmapRenderer } from '../render/heatmap';
   import { defaultCamera, pointOnPlane, project, screenRay, viewTransform, type Vec3, type ViewTransform } from '../render/camera';
-  import { traceAirflow } from '../render/airflow';
+  import { AirflowTrails, airflowHighlight } from '../render/airflow';
+  import { TemperatureDisplay } from '../render/temperature';
   import { paletteColor } from '../render/palette';
   import { Simulation } from '../sim/simulation';
   import type { Opening } from '../sim/config';
@@ -28,11 +29,10 @@
   let openingMarkers = $state<{ id: number; px: number; py: number; kind: string; open: boolean }[]>([]);
   let furnitureMarkers = $state<{ id: number; label: string; px: number; py: number }[]>([]);
   const boxes = $derived(app.room.furniture.flatMap(furnitureBoxes));
-  let airflow: Vec3[][] = [];
+  const airflow = new AirflowTrails();
+  const temperatureDisplay = new TemperatureDisplay();
   let airflowSim: Simulation | undefined;
-  let airflowElapsed = -1;
-  let airflowUpdated = -Infinity;
-  let airflowPhase = 0;
+  let airflowSeedsKey = "";
 
   $effect(() => {
     const key = simulationKey();
@@ -48,7 +48,7 @@
   });
   $effect(() => {
     app.resetToken;
-    untrack(() => { sim.reset(); pendingSeconds = 0; recorder.clear(); app.graphTick++; });
+    untrack(() => { sim.reset(); airflow.reset(); temperatureDisplay.reset(); pendingSeconds = 0; recorder.clear(); app.graphTick++; });
   });
   $effect(() => { renderer?.setPalette(app.palette); });
   $effect(() => { app.cameraToken; untrack(() => { camera = defaultCamera(); }); });
@@ -135,7 +135,7 @@
     return [[x, a, lo], [x, b, lo], [x, b, hi], [x, a, hi]];
   }
 
-  function drawOverlay(v: ViewTransform, tMin: number, tMax: number, now: number) {
+  function drawOverlay(v: ViewTransform, tMin: number, tMax: number, wallDt: number) {
     const dpr = fitCanvas(overlay, 2);
     const ctx = overlay.getContext('2d')!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, v.width, v.height);
@@ -172,35 +172,37 @@
       const p = project(v, [item.x, item.y, 0]); ctx.strokeStyle = '#d8e2f080'; ctx.beginPath(); ctx.ellipse(p.x, p.y, 5, 2.5, 0, 0, Math.PI * 2); ctx.stroke();
     }
     if (app.view === 'volume' && app.room.convection && app.showAirflow) {
-      if (airflowSim !== sim || (airflowElapsed !== sim.elapsed && now - airflowUpdated > 100)) {
-        airflowSim = sim; airflowElapsed = sim.elapsed; airflowUpdated = now;
-        const seeds: Vec3[] = [];
-        for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) {
-          seeds.push([w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)]);
-        }
-        // Extra seeds around each source reveal its plume and the returning circulation.
-        for (const source of app.room.sources) for (let i = 0; i < 12; i++) {
-          const angle = i * Math.PI / 6;
-          seeds.push([source.x + Math.cos(angle) * 0.18, source.y + Math.sin(angle) * 0.18,
-            Math.max(0.05, Math.min(h - 0.05, source.z + (source.kind === 'heat' ? 0.18 : -0.18)))]);
-        }
-        airflow = seeds.map((seed) => traceAirflow(sim, [w, l, h], seed)).filter((path) => path.length > 2);
+      const seeds: Vec3[] = [];
+      for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) {
+        seeds.push([w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)]);
       }
+      // Extra seeds around each source reveal its plume and the returning circulation.
+      for (const source of app.room.sources) for (let i = 0; i < 12; i++) {
+        const angle = i * Math.PI / 6;
+        seeds.push([source.x + Math.cos(angle) * 0.18, source.y + Math.sin(angle) * 0.18,
+          Math.max(0.05, Math.min(h - 0.05, source.z + (source.kind === 'heat' ? 0.18 : -0.18)))]);
+      }
+      const seedsKey = JSON.stringify(seeds);
+      if (airflowSim !== sim || airflowSeedsKey !== seedsKey) {
+        airflow.reset(); airflowSim = sim; airflowSeedsKey = seedsKey;
+      }
+      airflow.update(sim, [w, l, h], seeds, sim.elapsed, app.running ? wallDt : 0);
       ctx.lineCap = 'round';
-      for (let i = 0; i < airflow.length; i++) {
-        const path = airflow[i];
-        // Animated highlights indicate direction; their screen speed is for readability.
-        const head = (airflowPhase * 12 + i * 7.3) % (path.length + 8);
-        for (let j = 1; j < path.length; j++) {
-          const middle = path[j].map((n, axis) => (n + path[j - 1][axis]) / 2) as Vec3;
-          if (boxes.some((box) => intersectBox(middle, v.normal, box) !== null)) continue;
-          const age = head - j;
-          const highlight = age >= 0 && age < 7 ? 1 - age / 7 : 0;
-          const a = project(v, path[j - 1]), b = project(v, path[j]);
-          const rgb = paletteColor(app.palette, (sim.sample(...path[j]) - tMin) / (tMax - tMin));
-          ctx.strokeStyle = `rgba(${rgb.join(',')},${0.14 + 0.8 * highlight})`;
-          ctx.lineWidth = 1 + highlight * 1.6;
-          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      for (const layer of airflow.layers) {
+        if (layer.opacity === 0) continue;
+        for (let i = 0; i < layer.trails.length; i++) {
+          const { points: path, temperatures } = layer.trails[i];
+          for (let j = 1; j < path.length; j++) {
+            const middle = path[j].map((n, axis) => (n + path[j - 1][axis]) / 2) as Vec3;
+            if (boxes.some((box) => intersectBox(middle, v.normal, box) !== null)) continue;
+            const highlight = airflowHighlight(airflow.phase, i, j);
+            const taper = Math.min(1, j / 3, (path.length - j) / 3);
+            const a = project(v, path[j - 1]), b = project(v, path[j]);
+            const rgb = paletteColor(app.palette, (temperatures[j] - tMin) / (tMax - tMin));
+            ctx.strokeStyle = `rgba(${rgb.join(',')},${layer.opacity * taper * (0.14 + 0.8 * highlight)})`;
+            ctx.lineWidth = 1 + highlight * 1.6;
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+          }
         }
       }
       ctx.lineCap = 'butt';
@@ -230,13 +232,14 @@
         pendingSeconds -= sim.advance(pendingSeconds);
       } else pendingSeconds = 0;
       const s = sim.stats();
-      const targetMin = Math.floor(s.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(s.max / 2) * 2);
-      dispMin += (targetMin - dispMin) * 0.08; dispMax += (targetMax - dispMax) * 0.08;
+      const displayed = temperatureDisplay.update(sim, app.running ? wallDt : 0);
+      const targetMin = Math.floor(displayed.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(displayed.max / 2) * 2);
+      const rangeBlend = app.running ? -Math.expm1(-wallDt / 0.2) : 0;
+      dispMin += (targetMin - dispMin) * rangeBlend; dispMax += (targetMax - dispMax) * rangeBlend;
       transform = viewTransform(app.room, camera, canvas.clientWidth, canvas.clientHeight);
-      renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, temperatures: s,
+      renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, temperatures: displayed, temperatureField: temperatureDisplay,
         furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
-      if (app.running) airflowPhase += wallDt;
-      drawOverlay(transform, dispMin, dispMax, now);
+      drawOverlay(transform, dispMin, dispMax, wallDt);
       markers = [
         ...app.room.sources.map((p) => ({ ...p, kind: 'source' as const, cold: p.kind === 'cold' })),
         ...app.room.probes.map((p) => ({ ...p, kind: 'probe' as const, cold: false })),
