@@ -43,11 +43,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 
 ## Known limitations
 - Convection is a simplified 2D side-section model (coarser 64-cell grid, not CFD); toggling it restarts the simulation.
-- Cold sources are plain heat sinks (AC / draught) with no thermostat setpoint.
+- Thermostat control uses room-average temperature and switches all heat sources together; cold sources remain manual.
 - Open windows/doors are modelled as a high loss coefficient, not real airflow.
 - Palette choice is not saved or shared.
 - Room starts at 20 °C; outside temperature is adjustable (−30…40 °C) but constant over time.
 - Changing room size restarts the simulation.
+- Furniture thermal capacities and air-coupling conductances are representative estimates rather than measured values.
 
 ## Added after the MVP
 - ✅ Windows & doors with open/closed state (click them on the wall or use the sidebar)
@@ -64,15 +65,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ House exterior toggle (Display, side view): illustrated gable-roof cutaway with pitch-scaled coverings, visible insulation, eave details, chimney, pastel sky and clouds, trees, grass, path and split picket fence
 - ⬜ House exterior extras (behind the same toggle, not done yet): facade windows/doors, porch steps, sun, seasonal weather, heat-loss glow
 - ✅ Roof: pitch, insulation thickness (adds real ceiling heat loss) and covering (visual only); saved in share links
+- ✅ Automatic thermostat control (off by default; target/deadband hysteresis, visible heating/holding status, switches heat sources at configured output)
+- ✅ Heat-loss and energy accounting (live roof/walls/floor/openings loss, plus cumulative heating and cooling energy)
+- ✅ Heat-flow vector arrows (toggleable overlay using simulated temperature gradients and convection)
+- ✅ Thermally active furniture (default sofa and table; draggable, with furniture heat capacity included in energy balance)
 - ⬜ Not done yet: other roof shapes (hip, flat), garage/porch
 
 ## Add-later (all ⬜)
 - Humidity & moisture
 - 3D simulation
 - Custom room shapes / multi-room
-- Furniture
 - Multi-floor
-- Vector field arrows
 - Time-lapse playback
 - Floor plan import
 - Insulation database

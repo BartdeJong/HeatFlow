@@ -10,6 +10,11 @@ const full: RoomConfig = {
   convection: true,
   wall: { material: 'wood', thicknessM: 0.15, insulation: 'pir', insulationM: 0.08 },
   roof: { pitchDeg: 48, insulationM: 0.22, material: 'slate' },
+  thermostat: { enabled: true, targetC: 21.5, deadbandC: 0.8 },
+  furniture: [
+    { id: 1, kind: 'sofa', x: 1.6 },
+    { id: 2, kind: 'table', x: 4.2 },
+  ],
   sources: [
     { id: 1, kind: 'heat', x: 1.2, y: 2, powerKW: 2.4 },
     { id: 2, kind: 'cold', x: 5, y: 1, powerKW: 0.8 },
@@ -45,6 +50,13 @@ describe('share', () => {
     expect(room.ceilingM).toBe(2.5);
     expect(room.outsideC).toBe(0);
     expect(room.roof).toEqual(DEFAULT_ROOM.roof);
+  });
+
+  it('loads older v2 links with default thermostat and furniture', () => {
+    const code = btoa(JSON.stringify([2, 5, 4, 0, 0, 0.2, 0, 0, [], [], []]));
+    const room = decodeRoom(code)!;
+    expect(room.thermostat).toEqual(DEFAULT_ROOM.thermostat);
+    expect(room.furniture).toEqual(DEFAULT_ROOM.furniture);
   });
 
   it('rejects garbage', () => {

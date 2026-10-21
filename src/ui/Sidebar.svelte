@@ -4,7 +4,10 @@
     addProbe,
     addSource,
     app,
+    addFurniture,
+    moveItem,
     removeOpening,
+    removeFurniture,
     removeProbe,
     removeSource,
     resetSimulation,
@@ -15,6 +18,7 @@
     updateRoom,
     updateRoof,
     updateSource,
+    updateThermostat,
     updateWall,
   } from '../state/app.svelte';
   import {
@@ -24,6 +28,7 @@
     OPENING_SIDES,
     WALL_MATERIALS,
     holdPowerKW,
+    furnitureSize,
     roofU,
     wallLength,
     wallU,
@@ -59,6 +64,19 @@
     app.selection?.kind === 'source'
       ? app.room.sources.find((s) => s.id === app.selection!.id)
       : undefined,
+  );
+  const selectedFurniture = $derived(
+    app.selection?.kind === 'furniture'
+      ? app.room.furniture.find((f) => f.id === app.selection!.id)
+      : undefined,
+  );
+  const selectedFurnitureSize = $derived(
+    selectedFurniture ? furnitureSize(selectedFurniture.kind, app.room.widthM) : undefined,
+  );
+  const heatingPowerKW = $derived(
+    app.room.sources
+      .filter((source) => source.kind === 'heat')
+      .reduce((sum, source) => sum + source.powerKW, 0),
   );
 
   function flash(text: string) {
@@ -109,6 +127,10 @@
     const sec = Math.floor(s % 60);
     return h > 0 ? `${h} h ${m} min` : `${m} min ${sec.toString().padStart(2, '0')} s`;
   }
+
+  function fmtPower(w: number): string {
+    return Math.abs(w) >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${w.toFixed(0)} W`;
+  }
 </script>
 
 <aside class="sidebar">
@@ -138,6 +160,75 @@
   </fieldset>
 
   <fieldset>
+    <legend>Thermostat</legend>
+    <label class="check">
+      <input
+        type="checkbox"
+        checked={app.room.thermostat.enabled}
+        onchange={(e) => updateThermostat({ enabled: e.currentTarget.checked })}
+      />
+      Automatic heating
+    </label>
+    <p
+      class="thermostat-state"
+      class:heating={app.room.thermostat.enabled && heatingPowerKW > 0 && app.stats.thermostatHeating}
+      aria-live="polite"
+    >
+      <strong>Status</strong>
+      {#if !app.room.thermostat.enabled}
+        Off — heat sources run manually
+      {:else if heatingPowerKW <= 0}
+        No powered heat source
+      {:else if !app.running}
+        Simulation paused
+      {:else if app.stats.thermostatHeating}
+        Heating — {heatingPowerKW.toFixed(1)} kW enabled
+      {:else}
+        Holding — resumes at ≤{(app.room.thermostat.targetC - app.room.thermostat.deadbandC / 2).toFixed(2)} °C
+      {/if}
+    </p>
+    <label>
+      <span>Target <output>{app.room.thermostat.targetC.toFixed(1)} °C</output></span>
+      <input
+        type="range"
+        min={LIMITS.thermostatTarget.min}
+        max={LIMITS.thermostatTarget.max}
+        step={LIMITS.thermostatTarget.step}
+        value={app.room.thermostat.targetC}
+        oninput={(e) => updateThermostat({ targetC: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Deadband width <output>{app.room.thermostat.deadbandC.toFixed(1)} °C</output></span>
+      <input
+        type="range"
+        min={LIMITS.thermostatDeadband.min}
+        max={LIMITS.thermostatDeadband.max}
+        step={LIMITS.thermostatDeadband.step}
+        value={app.room.thermostat.deadbandC}
+        oninput={(e) => updateThermostat({ deadbandC: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <p class="hint">
+      Starts off. When enabled, all heat sources run at their set power until the room average reaches target + half the deadband, then pause until it falls below target − half the deadband. Cooling sources remain manual.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Energy &amp; heat loss</legend>
+    <dl class="stats">
+      <dt>Heat delivered</dt><dd>{app.stats.heatingKWh.toFixed(3)} kWh</dd>
+      <dt>Cooling delivered</dt><dd>{app.stats.coolingKWh.toFixed(3)} kWh</dd>
+      <dt>Current heat loss</dt><dd>{fmtPower(app.stats.heatLoss.totalW)}</dd>
+      <dt>Roof</dt><dd>{fmtPower(app.stats.heatLoss.roofW)}</dd>
+      <dt>Walls</dt><dd>{fmtPower(app.stats.heatLoss.wallsW)}</dd>
+      <dt>Floor</dt><dd>{fmtPower(app.stats.heatLoss.floorW)}</dd>
+      <dt>Windows &amp; doors</dt><dd>{fmtPower(app.stats.heatLoss.openingsW)}</dd>
+    </dl>
+    <p class="hint">Positive heat loss leaves the room; negative values mean heat is entering from outside. Energy totals accumulate while the simulation runs and clear on reset.</p>
+  </fieldset>
+
+  <fieldset>
     <legend>Display</legend>
     <label>
       Colour palette
@@ -159,9 +250,50 @@
       <input type="checkbox" bind:checked={app.exterior} />
       House exterior (walls &amp; roof)
     </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={app.showVectors} />
+      Heat-flow arrows
+    </label>
     {#if app.room.convection}
       <p class="hint">Warm air rises in this side view. Toggling this restarts the simulation.</p>
     {/if}
+  </fieldset>
+
+  <fieldset>
+    <legend>Furniture</legend>
+    <div class="row">
+      <button onclick={() => addFurniture('sofa')} disabled={app.room.furniture.length >= LIMITS.furniture}>
+        + Sofa
+      </button>
+      <button onclick={() => addFurniture('table')} disabled={app.room.furniture.length >= LIMITS.furniture}>
+        + Table
+      </button>
+    </div>
+    <ul class="items">
+      {#each app.room.furniture as item (item.id)}
+        {@const size = furnitureSize(item.kind, app.room.widthM)}
+        <li class:sel={app.selection?.kind === 'furniture' && app.selection.id === item.id}>
+          <button class="item" onclick={() => select({ kind: 'furniture', id: item.id })}>
+            {item.kind === 'sofa' ? '🛋 Sofa' : '▰ Table'} {item.id} · {size.widthM.toFixed(1)} m
+          </button>
+          <button onclick={() => removeFurniture(item.id)} aria-label="Remove furniture {item.id}">🗑</button>
+        </li>
+      {/each}
+    </ul>
+    {#if selectedFurniture}
+      <label>
+        <span>Position <output>{selectedFurniture.x.toFixed(1)} m</output></span>
+        <input
+          type="range"
+          min={selectedFurnitureSize ? selectedFurnitureSize.widthM / 2 : 0}
+          max={selectedFurnitureSize ? app.room.widthM - selectedFurnitureSize.widthM / 2 : app.room.widthM}
+          step="0.1"
+          value={selectedFurniture.x}
+          oninput={(e) => moveItem('furniture', selectedFurniture.id, e.currentTarget.valueAsNumber, 0)}
+        />
+      </label>
+    {/if}
+    <p class="hint">Furniture has thermal mass and exchanges heat with nearby air. Drag items across the floor; changes affect the simulation.</p>
   </fieldset>
 
   <fieldset>
@@ -557,6 +689,23 @@
     margin: 0;
     font-size: 12px;
     color: #7c849a;
+  }
+  .thermostat-state {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0;
+    padding: 7px 9px;
+    border-radius: 6px;
+    background: #262a35;
+    color: #9aa3b8;
+    font-size: 12px;
+  }
+  .thermostat-state strong {
+    color: #d1d5df;
+  }
+  .thermostat-state.heating {
+    color: #ffb27a;
   }
   .check {
     flex-direction: row;

@@ -2,16 +2,19 @@
   import { onMount, untrack } from 'svelte';
   import { createRenderer, type HeatmapRenderer } from '../render/heatmap';
   import { Simulation } from '../sim/simulation';
-  import { ROOF_MATERIALS, roofGeometry } from '../sim/config';
+  import { furnitureSize, ROOF_MATERIALS, roofGeometry } from '../sim/config';
+  import type { HeatFlowVector } from '../sim/simulation';
   import { app, moveItem, recorder, select, updateOpening } from '../state/app.svelte';
 
   let canvas: HTMLCanvasElement;
   let roomEl: HTMLDivElement;
   let renderer: HeatmapRenderer | undefined;
-  let sim = new Simulation($state.snapshot(app.room));
+  let sim = $state.raw(new Simulation($state.snapshot(app.room)));
   let simKey = `${app.room.widthM}|${app.room.heightM}|${app.room.ceilingM}|${app.room.convection}`;
-  let drag = $state<{ kind: 'source' | 'probe'; id: number } | null>(null);
+  let drag = $state<{ kind: 'source' | 'probe' | 'furniture'; id: number } | null>(null);
+  let dragOffsetX = 0;
   let hover = $state<{ px: number; py: number; temp: number } | null>(null);
+  let vectors = $state<HeatFlowVector[]>([]);
   let hoverRaw: { x: number; y: number; px: number; py: number } | null = null;
 
   // Rebuild the grid only when size or convection mode actually change.
@@ -58,16 +61,18 @@
     return { x, y, px: e.clientX - rect.left, py: e.clientY - rect.top };
   }
 
-  function move(kind: 'source' | 'probe', id: number, x: number, y: number) {
+  function move(kind: 'source' | 'probe' | 'furniture', id: number, x: number, y: number) {
     moveItem(kind, id, x, y);
     if (kind === 'probe') recorder.clearSeries(`p${id}`);
   }
 
-  function startDrag(e: PointerEvent, kind: 'source' | 'probe', id: number) {
+  function startDrag(e: PointerEvent, kind: 'source' | 'probe' | 'furniture', id: number) {
     e.stopPropagation();
     roomEl.setPointerCapture(e.pointerId);
     select({ kind, id });
     drag = { kind, id };
+    const p = pointToRoom(e);
+    dragOffsetX = kind === 'furniture' ? (app.room.furniture.find((f) => f.id === id)?.x ?? p.x) - p.x : 0;
   }
 
   function onPointerDown(e: PointerEvent) {
@@ -75,6 +80,7 @@
     if (!sel || sel.kind === 'opening') return;
     roomEl.setPointerCapture(e.pointerId);
     drag = { kind: sel.kind, id: sel.id };
+    dragOffsetX = 0;
     const p = pointToRoom(e);
     move(sel.kind, sel.id, p.x, p.y);
     hoverRaw = p;
@@ -83,7 +89,7 @@
   function onPointerMove(e: PointerEvent) {
     const p = pointToRoom(e);
     hoverRaw = p;
-    if (drag) move(drag.kind, drag.id, p.x, p.y);
+    if (drag) move(drag.kind, drag.id, p.x + dragOffsetX, p.y);
   }
 
   function onPointerUp(e: PointerEvent) {
@@ -91,7 +97,13 @@
     if (e.pointerType !== 'mouse') hoverRaw = null;
   }
 
-  function onKey(e: KeyboardEvent, kind: 'source' | 'probe', id: number, x: number, y: number) {
+  function onKey(
+    e: KeyboardEvent,
+    kind: 'source' | 'probe' | 'furniture',
+    id: number,
+    x: number,
+    y: number,
+  ) {
     const step = e.shiftKey ? 0.5 : 0.1;
     const d: Record<string, [number, number]> = {
       ArrowLeft: [-step, 0],
@@ -155,7 +167,12 @@
           mean: s.mean,
           tMin: dispMin,
           tMax: dispMax,
+          heatingKWh: sim.energyUseKWh().heating,
+          coolingKWh: sim.energyUseKWh().cooling,
+          thermostatHeating: sim.thermostatHeatingOn(),
         });
+        app.stats.heatLoss = sim.heatLossBreakdownW();
+        vectors = app.showVectors ? sim.vectorField() : [];
         hover = hoverRaw
           ? { px: hoverRaw.px, py: hoverRaw.py, temp: sim.sample(hoverRaw.x, hoverRaw.y) }
           : null;
@@ -507,6 +524,78 @@
       {/each}
     </svg>
 
+    {#if app.showVectors}
+      <svg
+        class="vectors"
+        viewBox="0 0 {app.room.widthM} {app.room.ceilingM}"
+        preserveAspectRatio="none"
+        aria-label="Heat-flow vectors"
+      >
+        <defs>
+          <marker id="heat-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="0.12" markerHeight="0.12" orient="auto">
+            <path d="M0 0L10 5L0 10z" fill="#fff" />
+          </marker>
+        </defs>
+        {#each vectors as vector}
+          {@const length = Math.max(sim.dx * 0.45, Math.min(sim.dx * 1.7, sim.dx * (0.35 + Math.log1p(vector.magnitude) * 0.45)))}
+          <line
+            x1={vector.x}
+            y1={vector.y}
+            x2={vector.x + (vector.dx / vector.magnitude) * length}
+            y2={vector.y + (vector.dy / vector.magnitude) * length}
+            stroke="#18212a"
+            stroke-opacity=".55"
+            stroke-width=".055"
+          />
+          <line
+            x1={vector.x}
+            y1={vector.y}
+            x2={vector.x + (vector.dx / vector.magnitude) * length}
+            y2={vector.y + (vector.dy / vector.magnitude) * length}
+            stroke="#fff"
+            stroke-width=".027"
+            marker-end="url(#heat-arrow)"
+          />
+        {/each}
+      </svg>
+    {/if}
+
+    <svg
+      class="furniture"
+      viewBox="0 0 {app.room.widthM} {app.room.ceilingM}"
+      preserveAspectRatio="none"
+      aria-label="Furniture"
+    >
+      {#each app.room.furniture as item (item.id)}
+        {@const size = furnitureSize(item.kind, app.room.widthM)}
+        {@const x = item.x - size.widthM / 2}
+        {@const y = app.room.ceilingM - size.heightM}
+        <g
+          class="furniture-item {item.kind}"
+          class:selected={app.selection?.kind === 'furniture' && app.selection.id === item.id}
+          role="button"
+          tabindex="0"
+          aria-label="Move {item.kind} {item.id}"
+          onpointerdown={(e) => startDrag(e, 'furniture', item.id)}
+          onfocus={() => select({ kind: 'furniture', id: item.id })}
+          onkeydown={(e) => onKey(e, 'furniture', item.id, item.x, app.room.ceilingM)}
+        >
+          {#if item.kind === 'sofa'}
+            <rect class="furniture-shadow" x={x - 0.05} y={y + size.heightM - 0.07} width={size.widthM + 0.1} height=".1" rx=".05" />
+            <rect class="sofa-body" x={x + size.widthM * 0.06} y={y + size.heightM * 0.28} width={size.widthM * 0.88} height={size.heightM * 0.67} rx=".12" />
+            <rect class="sofa-back" x={x + size.widthM * 0.08} y={y + size.heightM * 0.03} width={size.widthM * 0.84} height={size.heightM * 0.46} rx=".1" />
+            <rect class="sofa-arm" x={x} y={y + size.heightM * 0.35} width={size.widthM * 0.14} height={size.heightM * 0.52} rx=".06" />
+            <rect class="sofa-arm" x={x + size.widthM * 0.86} y={y + size.heightM * 0.35} width={size.widthM * 0.14} height={size.heightM * 0.52} rx=".06" />
+            <path d={`M${item.x} ${y + size.heightM * 0.12}v${size.heightM * 0.3}`} stroke="#f4d6bc" stroke-width=".025" />
+          {:else}
+            <rect class="furniture-shadow" x={x - 0.06} y={y + size.heightM - 0.06} width={size.widthM + 0.12} height=".08" rx=".04" />
+            <rect class="table-top" x={x} y={y + size.heightM * 0.22} width={size.widthM} height={size.heightM * 0.2} rx=".035" />
+            <path class="table-leg" d={`M${x + size.widthM * 0.12} ${y + size.heightM * 0.4}v${size.heightM * 0.55}m${size.widthM * 0.76} 0v-${size.heightM * 0.55}`} />
+          {/if}
+        </g>
+      {/each}
+    </svg>
+
     {#each app.room.sources as s (s.id)}
       <div
         class="marker source {s.kind}"
@@ -612,6 +701,54 @@
     height: 100%;
     pointer-events: none;
     overflow: visible;
+  }
+  .vectors,
+  .furniture {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .furniture-item {
+    pointer-events: visiblePainted;
+    cursor: grab;
+    touch-action: none;
+  }
+  .furniture-item:active {
+    cursor: grabbing;
+  }
+  .furniture-item.selected {
+    filter: drop-shadow(0 0 0.08px #fff) drop-shadow(0 0 0.08px #5aa9ff);
+  }
+  .furniture-shadow {
+    fill: #1118;
+  }
+  .sofa-body {
+    fill: #7e5546;
+    stroke: #442e28;
+    stroke-width: 0.035;
+  }
+  .sofa-back {
+    fill: #9d6a54;
+    stroke: #50372e;
+    stroke-width: 0.035;
+  }
+  .sofa-arm {
+    fill: #b77b5d;
+    stroke: #50372e;
+    stroke-width: 0.03;
+  }
+  .table-top {
+    fill: #ae8052;
+    stroke: #513d2b;
+    stroke-width: 0.035;
+  }
+  .table-leg {
+    fill: none;
+    stroke: #61452e;
+    stroke-width: 0.06;
   }
   .opening {
     pointer-events: auto;

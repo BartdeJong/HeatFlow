@@ -4,6 +4,21 @@ export type SourceKind = 'heat' | 'cold';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
 export type RoofMaterialId = 'tiles' | 'slate' | 'metal' | 'thatch';
+export type FurnitureKind = 'sofa' | 'table';
+export const FURNITURE_KINDS: FurnitureKind[] = ['sofa', 'table'];
+
+export interface ThermostatConfig {
+  enabled: boolean;
+  targetC: number;
+  deadbandC: number;
+}
+
+export interface FurnitureItem {
+  id: number;
+  kind: FurnitureKind;
+  /** Horizontal centre position in metres. Furniture rests on the floor. */
+  x: number;
+}
 
 export interface RoofConfig {
   /** Gable roof pitch in degrees. */
@@ -63,6 +78,8 @@ export interface RoomConfig {
   convection: boolean;
   wall: WallConfig;
   roof: RoofConfig;
+  thermostat: ThermostatConfig;
+  furniture: FurnitureItem[];
   sources: HeatSource[];
   openings: Opening[];
   probes: Probe[];
@@ -151,10 +168,13 @@ export const LIMITS = {
   insulation: { min: 0, max: 0.2, step: 0.01 },
   pitch: { min: 10, max: 60, step: 1 },
   roofInsulation: { min: 0, max: 0.3, step: 0.01 },
+  thermostatTarget: { min: 5, max: 30, step: 0.5 },
+  thermostatDeadband: { min: 0.2, max: 3, step: 0.1 },
   openingLength: { min: 0.3, step: 0.1 },
   sources: 8,
   openings: 8,
   probes: 3,
+  furniture: 8,
 } as const;
 
 export const DEFAULT_WALL: WallConfig = {
@@ -166,6 +186,26 @@ export const DEFAULT_WALL: WallConfig = {
 
 export const DEFAULT_ROOF: RoofConfig = { pitchDeg: 35, insulationM: 0.1, material: 'tiles' };
 
+export const DEFAULT_THERMOSTAT: ThermostatConfig = {
+  enabled: false,
+  targetC: 20,
+  deadbandC: 0.5,
+};
+
+export function furnitureSize(kind: FurnitureKind, roomWidthM: number): { widthM: number; heightM: number } {
+  return kind === 'sofa'
+    ? { widthM: Math.min(1.8, roomWidthM * 0.38), heightM: 0.78 }
+    : { widthM: Math.min(1, roomWidthM * 0.22), heightM: 0.48 };
+}
+
+export function defaultFurniture(roomWidthM: number): FurnitureItem[] {
+  const rounded = (x: number) => Number(x.toFixed(3));
+  return [
+    { id: 1, kind: 'sofa', x: rounded(roomWidthM * 0.28) },
+    { id: 2, kind: 'table', x: rounded(roomWidthM * 0.72) },
+  ];
+}
+
 export const DEFAULT_ROOM: RoomConfig = {
   widthM: 5,
   heightM: 4,
@@ -174,6 +214,8 @@ export const DEFAULT_ROOM: RoomConfig = {
   convection: false,
   wall: DEFAULT_WALL,
   roof: DEFAULT_ROOF,
+  thermostat: DEFAULT_THERMOSTAT,
+  furniture: defaultFurniture(5),
   sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2.0, powerKW: 1.54 }],
   openings: [],
   probes: [],
@@ -306,8 +348,25 @@ function sanitizeRoof(r: Partial<RoofConfig> | undefined): RoofConfig {
   };
 }
 
+function sanitizeThermostat(t: Partial<ThermostatConfig> | undefined): ThermostatConfig {
+  return {
+    enabled: t?.enabled === true,
+    targetC: clamp(t?.targetC ?? DEFAULT_THERMOSTAT.targetC, LIMITS.thermostatTarget.min, LIMITS.thermostatTarget.max),
+    deadbandC: clamp(
+      t?.deadbandC ?? DEFAULT_THERMOSTAT.deadbandC,
+      LIMITS.thermostatDeadband.min,
+      LIMITS.thermostatDeadband.max,
+    ),
+  };
+}
+
 /** Clamp every value into its valid range and drop malformed entries. Accepts untrusted input. */
-export function sanitizeRoom(c: Partial<Omit<RoomConfig, 'roof'>> & { roof?: Partial<RoofConfig> }): RoomConfig {
+export function sanitizeRoom(
+  c: Partial<Omit<RoomConfig, 'roof' | 'thermostat'>> & {
+    roof?: Partial<RoofConfig>;
+    thermostat?: Partial<ThermostatConfig>;
+  },
+): RoomConfig {
   const widthM = clamp(c.widthM, LIMITS.size.min, LIMITS.size.max);
   const heightM = clamp(c.heightM, LIMITS.size.min, LIMITS.size.max);
   const ceilingM = clamp(c.ceilingM ?? DEFAULT_ROOM.ceilingM, LIMITS.size.min, LIMITS.size.max);
@@ -347,6 +406,18 @@ export function sanitizeRoom(c: Partial<Omit<RoomConfig, 'roof'>> & { roof?: Par
     })),
   );
 
+  const furniture = withIds(
+    entries<FurnitureItem>(c.furniture ?? defaultFurniture(widthM), LIMITS.furniture).map((f) => {
+      const kind = pick(f.kind, ['sofa', 'table'], 'sofa');
+      const { widthM: itemWidth } = furnitureSize(kind, widthM);
+      return {
+        id: f.id as number,
+        kind,
+        x: clamp(f.x, itemWidth / 2, widthM - itemWidth / 2),
+      };
+    }),
+  );
+
   return {
     widthM,
     heightM,
@@ -355,6 +426,8 @@ export function sanitizeRoom(c: Partial<Omit<RoomConfig, 'roof'>> & { roof?: Par
     convection: c.convection === true,
     wall: sanitizeWall(c.wall),
     roof: sanitizeRoof(c.roof),
+    thermostat: sanitizeThermostat(c.thermostat),
+    furniture,
     sources,
     openings,
     probes,

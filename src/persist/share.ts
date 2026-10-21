@@ -1,5 +1,6 @@
 import {
   DEFAULT_ROOM,
+  FURNITURE_KINDS,
   INSULATIONS,
   OPENING_KINDS,
   ROOF_MATERIALS,
@@ -42,6 +43,10 @@ export function encodeRoom(room: RoomConfig): string {
     r(room.roof.pitchDeg),
     r(room.roof.insulationM),
     ROOF_MATERIALS.findIndex((m) => m.id === room.roof.material),
+    room.thermostat.enabled ? 1 : 0,
+    r(room.thermostat.targetC),
+    r(room.thermostat.deadbandC),
+    room.furniture.map((f) => [FURNITURE_KINDS.indexOf(f.kind), r(f.x)]),
   ];
   const b64 = btoa(JSON.stringify(arr));
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -70,7 +75,7 @@ export function decodeRoom(code: string): RoomConfig | null {
       return legacyRoom(w, h, p, u, sx, sy);
     }
 
-    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 16) return null;
+    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 20) return null;
     const head = arr.slice(1, 8);
     if (!allNums(head)) return null;
     const [widthM, heightM, conv, mat, thick, ins, insM] = head as number[];
@@ -78,10 +83,16 @@ export function decodeRoom(code: string): RoomConfig | null {
     const openings = rows(arr[9], 5);
     const probes = rows(arr[10], 2);
     if (!sources || !openings || !probes) return null;
-    // Optional trailing fields, appended over time: ceiling, outside, roof pitch, roof insulation, roof material.
-    const extra = arr.slice(11);
-    if (!allNums(extra)) return null;
-    const [ceilingM, outsideC, pitchDeg, roofInsM, roofMat] = extra as (number | undefined)[];
+    // Optional trailing fields, appended over time to retain old v2 links.
+    const roomExtra = arr.slice(11, 16);
+    const thermostatExtra = arr.slice(16, 19);
+    if (!allNums(roomExtra) || !allNums(thermostatExtra)) return null;
+    const [ceilingM, outsideC, pitchDeg, roofInsM, roofMat] = roomExtra as (number | undefined)[];
+    const [thermostatEnabled, thermostatTargetC, thermostatDeadbandC] = thermostatExtra as
+      | [number?, number?, number?]
+      | [];
+    const furnitureRows = arr.length > 19 ? rows(arr[19], 2) : null;
+    if (arr.length > 19 && !furnitureRows) return null;
 
     return sanitizeRoom({
       widthM,
@@ -89,6 +100,11 @@ export function decodeRoom(code: string): RoomConfig | null {
       ceilingM,
       outsideC,
       roof: { pitchDeg, insulationM: roofInsM, material: ROOF_MATERIALS[roofMat ?? -1]?.id },
+      thermostat: {
+        enabled: thermostatEnabled === 1,
+        targetC: thermostatTargetC,
+        deadbandC: thermostatDeadbandC,
+      },
       convection: conv === 1,
       wall: {
         material: WALL_MATERIALS[mat]?.id,
@@ -112,6 +128,11 @@ export function decodeRoom(code: string): RoomConfig | null {
         open: open === 1,
       })),
       probes: probes.map(([x, y], i) => ({ id: i + 1, x, y })),
+      furniture: furnitureRows?.map(([kind, x], i) => ({
+        id: i + 1,
+        kind: FURNITURE_KINDS[kind],
+        x,
+      })),
     });
   } catch {
     return null;

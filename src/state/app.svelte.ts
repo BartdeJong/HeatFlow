@@ -4,11 +4,13 @@ import {
   nextId,
   sanitizeRoom,
   type HeatSource,
+  type FurnitureKind,
   type Opening,
   type OpeningKind,
   type RoofConfig,
   type RoomConfig,
   type SourceKind,
+  type ThermostatConfig,
   type WallConfig,
 } from '../sim/config';
 import { Recorder } from '../sim/recorder';
@@ -17,7 +19,7 @@ import type { PaletteId } from '../render/palette';
 
 export const SPEEDS = [1, 10, 30, 100, 300, 1000] as const;
 
-export type Selection = { kind: 'source' | 'probe' | 'opening'; id: number } | null;
+export type Selection = { kind: 'source' | 'probe' | 'opening' | 'furniture'; id: number } | null;
 
 function initialRoom(): RoomConfig {
   return roomFromHash(location.hash) ?? structuredClone(DEFAULT_ROOM);
@@ -30,12 +32,24 @@ export const app = $state({
   palette: 'heat' as PaletteId,
   /** Draw the walls and the gable roof around the room section. */
   exterior: false,
+  showVectors: false,
   selection: null as Selection,
   /** Incremented to request a simulation reset. */
   resetToken: 0,
   /** Incremented whenever the recorder gains a sample, so graphs can redraw. */
   graphTick: 0,
-  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30 },
+  stats: {
+    elapsed: 0,
+    min: 20,
+    max: 20,
+    mean: 20,
+    tMin: 0,
+    tMax: 30,
+    heatingKWh: 0,
+    coolingKWh: 0,
+    thermostatHeating: true,
+    heatLoss: { roofW: 0, wallsW: 0, floorW: 0, openingsW: 0, totalW: 0 },
+  },
 });
 
 /** Temperature history for the graph; lives outside reactive state because it changes constantly. */
@@ -59,6 +73,10 @@ export function updateWall(patch: Partial<WallConfig>): void {
 
 export function updateRoof(patch: Partial<RoofConfig>): void {
   edit((r) => Object.assign(r.roof, patch));
+}
+
+export function updateThermostat(patch: Partial<ThermostatConfig>): void {
+  edit((r) => Object.assign(r.thermostat, patch));
 }
 
 export function setRoom(room: RoomConfig): void {
@@ -163,10 +181,28 @@ export function removeProbe(id: number): void {
   if (app.selection?.kind === 'probe' && app.selection.id === id) app.selection = null;
 }
 
-/** Move a source or probe to a position in metres. */
-export function moveItem(kind: 'source' | 'probe', id: number, x: number, y: number): void {
+export function addFurniture(kind: FurnitureKind): void {
+  if (app.room.furniture.length >= LIMITS.furniture) return;
+  const id = nextId(app.room.furniture);
+  const x = app.room.widthM * (app.room.furniture.length % 2 === 0 ? 0.25 : 0.75);
+  edit((r) => r.furniture.push({ id, kind, x }));
+  app.selection = { kind: 'furniture', id };
+}
+
+export function removeFurniture(id: number): void {
   edit((r) => {
-    const item = (kind === 'source' ? r.sources : r.probes).find((i) => i.id === id);
-    if (item) Object.assign(item, { x, y });
+    r.furniture = r.furniture.filter((item) => item.id !== id);
+  });
+  if (app.selection?.kind === 'furniture' && app.selection.id === id) app.selection = null;
+}
+
+/** Move a source, probe or furniture item to a position in metres. */
+export function moveItem(kind: 'source' | 'probe' | 'furniture', id: number, x: number, y: number): void {
+  edit((r) => {
+    const item =
+      kind === 'source' ? r.sources.find((i) => i.id === id) :
+      kind === 'probe' ? r.probes.find((i) => i.id === id) :
+      r.furniture.find((i) => i.id === id);
+    if (item) Object.assign(item, kind === 'furniture' ? { x } : { x, y });
   });
 }
