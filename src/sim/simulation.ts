@@ -1,6 +1,7 @@
 import {
   DEFAULT_PHYSICS,
   openingU,
+  roofU,
   wallLength,
   wallU,
   type PhysicsParams,
@@ -63,6 +64,8 @@ export class Simulation {
   /** Per-cell wall loss coefficient (sum of U over the cell's exposed faces), W/m²K. */
   private lossU: Float32Array;
   private lossK: Float32Array;
+  /** Per-cell fractional temperature loss per step through the front and back walls. */
+  private frontBackK = 0;
   /** Heat capacity of one cell in J/K. */
   private readonly cellCap: number;
 
@@ -80,13 +83,13 @@ export class Simulation {
     this.convection = room.convection;
     const target = this.convection ? TARGET_CELLS_CONVECTION : TARGET_CELLS;
     const alpha = this.convection ? params.convectionAlpha : params.alpha;
-    this.dx = Math.max(room.widthM, room.heightM) / target;
+    this.dx = Math.max(room.widthM, room.ceilingM) / target;
     this.nx = Math.max(2, Math.round(room.widthM / this.dx));
-    this.ny = Math.max(2, Math.round(room.heightM / this.dx));
+    this.ny = Math.max(2, Math.round(room.ceilingM / this.dx));
     this.dt = (0.2 * this.dx * this.dx) / alpha;
     this.flowEvery = Math.max(1, Math.round(FLOW_STEP_SECONDS / this.dt));
     this.cellCap =
-      params.airDensity * params.airCp * this.dx * this.dx * room.ceilingM * params.massFactor;
+      params.airDensity * params.airCp * this.dx * this.dx * room.heightM * params.massFactor;
 
     const n = this.nx * this.ny;
     this.T = new Float32Array(n).fill(params.initialC);
@@ -135,7 +138,9 @@ export class Simulation {
 
   /** U-value for each cell along a wall, with openings overriding the wall construction. */
   private sideProfile(side: WallSide, count: number): Float32Array {
-    const base = wallU(this.room.wall) * this.params.uScale;
+    // The top edge is the ceiling, i.e. the roof construction.
+    const construction = side === 'top' ? roofU(this.room.roof) : wallU(this.room.wall);
+    const base = construction * this.params.uScale;
     const profile = new Float32Array(count).fill(base);
     const len = wallLength(this.room, side);
     for (const o of this.room.openings) {
@@ -174,6 +179,9 @@ export class Simulation {
     }
     const k = dt / (airDensity * airCp * dx * massFactor);
     for (let i = 0; i < lossU.length; i++) lossK[i] = lossU[i] * k;
+    // The front and back walls (not part of the section) lose heat over every cell.
+    this.frontBackK =
+      (2 * wallU(this.room.wall) * this.params.uScale * dt) / (airDensity * airCp * this.room.heightM * massFactor);
   }
 
   reset(): void {
@@ -200,7 +208,7 @@ export class Simulation {
   }
 
   private step(): void {
-    const { nx, ny, dt, dx, lossK, cellCap } = this;
+    const { nx, ny, dt, dx, lossK, cellCap, frontBackK } = this;
     const alpha = this.convection ? this.params.convectionAlpha : this.params.alpha;
     const outsideC = this.room.outsideC;
     const T = this.T;
@@ -217,7 +225,7 @@ export class Simulation {
         const u = y > 0 ? T[i - nx] : c;
         const d = y < ny - 1 ? T[i + nx] : c;
         let v = c + r * (l + rt + u + d - 4 * c);
-        const k = lossK[i];
+        const k = lossK[i] + frontBackK;
         if (k !== 0) v -= k * (c - outsideC);
         out[i] = v;
       }
@@ -330,12 +338,15 @@ export class Simulation {
   wallLossW(): number {
     const { dx, lossU, T } = this;
     const outsideC = this.room.outsideC;
-    const depthM = this.room.ceilingM;
+    const depthM = this.room.heightM;
     let sum = 0;
+    let roofSum = 0;
     for (let i = 0; i < lossU.length; i++) {
       if (lossU[i] !== 0) sum += lossU[i] * (T[i] - outsideC);
+      roofSum += T[i] - outsideC;
     }
-    return sum * dx * depthM;
+    const frontBackU = 2 * wallU(this.room.wall) * this.params.uScale;
+    return sum * dx * depthM + roofSum * frontBackU * dx * dx;
   }
 
   /** Total thermal energy above the outside temperature, in joules. */

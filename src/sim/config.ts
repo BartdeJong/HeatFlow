@@ -3,6 +3,16 @@ export type InsulationId = 'mineral' | 'eps' | 'pir';
 export type SourceKind = 'heat' | 'cold';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
+export type RoofMaterialId = 'tiles' | 'slate' | 'metal' | 'thatch';
+
+export interface RoofConfig {
+  /** Gable roof pitch in degrees. */
+  pitchDeg: number;
+  /** Thickness of the roof insulation layer in metres (0 = none). */
+  insulationM: number;
+  /** Appearance only. */
+  material: RoofMaterialId;
+}
 
 export interface WallConfig {
   material: WallMaterialId;
@@ -37,16 +47,22 @@ export interface Probe {
   y: number;
 }
 
+/**
+ * The room is shown and simulated as a side section: x is the width, y is the height
+ * (floor at the bottom, ceiling at the top). Sources, probes and openings live in that section.
+ */
 export interface RoomConfig {
   widthM: number;
+  /** Length of the room, i.e. its depth into the screen (front to back), m. */
   heightM: number;
-  /** Third dimension, m. Ceiling height in plan view; the depth of the slice in convection (side) view. */
+  /** Ceiling height, m (the vertical axis of the side view). */
   ceilingM: number;
   /** Outside air temperature, °C. */
   outsideC: number;
-  /** Simulate hot-air buoyancy; the view is then a side section with the ceiling at the top. */
+  /** Simulate hot-air buoyancy (air currents) in addition to diffusion. */
   convection: boolean;
   wall: WallConfig;
+  roof: RoofConfig;
   sources: HeatSource[];
   openings: Opening[];
   probes: Probe[];
@@ -79,11 +95,40 @@ export const INSULATIONS: ReadonlyArray<{ id: InsulationId; label: string; k: nu
   { id: 'pir', label: 'PIR board', k: 0.022 },
 ];
 
+export const ROOF_MATERIALS: ReadonlyArray<{ id: RoofMaterialId; label: string; color: string }> = [
+  { id: 'tiles', label: 'Clay tiles', color: '#b5523b' },
+  { id: 'slate', label: 'Slate', color: '#4b5563' },
+  { id: 'metal', label: 'Metal', color: '#8a97a6' },
+  { id: 'thatch', label: 'Thatch', color: '#b59a58' },
+];
+
+/** Roof structure (tiles, battens, ceiling) plus inside/outside surface resistance, m²K/W. */
+const R_ROOF_BASE = 0.3;
+const K_ROOF_INSULATION = 0.04;
+
+/** U-value of the roof/ceiling construction in W/m²K. */
+export function roofU(roof: Pick<RoofConfig, 'insulationM'>): number {
+  return 1 / (R_ROOF_BASE + roof.insulationM / K_ROOF_INSULATION);
+}
+
+/** Gable roof (seen from the side) whose ridge runs along the room's length; the roof sits on the outer walls. */
+export function roofGeometry(room: Pick<RoomConfig, 'widthM' | 'roof' | 'wall'>, overhangM = 0.3) {
+  const wallT = room.wall.thicknessM + room.wall.insulationM;
+  const rise = (room.widthM / 2 + wallT) * Math.tan((room.roof.pitchDeg * Math.PI) / 180);
+  return { rise, overhangM };
+}
+
 export const SIDES: ReadonlyArray<{ id: WallSide; label: string }> = [
   { id: 'top', label: 'Top' },
   { id: 'right', label: 'Right' },
   { id: 'bottom', label: 'Bottom' },
   { id: 'left', label: 'Left' },
+];
+
+/** Openings can only be placed in the left and right wall of the side view. */
+export const OPENING_SIDES: ReadonlyArray<{ id: WallSide; label: string }> = [
+  { id: 'left', label: 'Left wall' },
+  { id: 'right', label: 'Right wall' },
 ];
 
 export const OPENING_KINDS: ReadonlyArray<OpeningKind> = ['window', 'door'];
@@ -104,6 +149,8 @@ export const LIMITS = {
   power: { min: 0, max: 10, step: 0.1 },
   thickness: { min: 0.05, max: 0.5, step: 0.01 },
   insulation: { min: 0, max: 0.2, step: 0.01 },
+  pitch: { min: 10, max: 60, step: 1 },
+  roofInsulation: { min: 0, max: 0.3, step: 0.01 },
   openingLength: { min: 0.3, step: 0.1 },
   sources: 8,
   openings: 8,
@@ -117,6 +164,8 @@ export const DEFAULT_WALL: WallConfig = {
   insulationM: 0.02,
 };
 
+export const DEFAULT_ROOF: RoofConfig = { pitchDeg: 35, insulationM: 0.1, material: 'tiles' };
+
 export const DEFAULT_ROOM: RoomConfig = {
   widthM: 5,
   heightM: 4,
@@ -124,7 +173,8 @@ export const DEFAULT_ROOM: RoomConfig = {
   outsideC: 0,
   convection: false,
   wall: DEFAULT_WALL,
-  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, powerKW: 0.97 }],
+  roof: DEFAULT_ROOF,
+  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2.0, powerKW: 1.54 }],
   openings: [],
   probes: [],
 };
@@ -148,7 +198,7 @@ function pick<T extends string>(v: unknown, ids: ReadonlyArray<T>, fallback: T):
 
 const materialIds = WALL_MATERIALS.map((m) => m.id);
 const insulationIds = INSULATIONS.map((m) => m.id);
-const sideIds = SIDES.map((s) => s.id);
+const openingSideIds = OPENING_SIDES.map((s) => s.id);
 
 /** U-value of the wall construction in W/m²K. */
 export function wallU(wall: WallConfig): number {
@@ -165,18 +215,24 @@ export function openingU(o: Pick<Opening, 'kind' | 'open'>): number {
 /** Total heat loss in watts through all walls and openings if the whole room sat at `targetC`. */
 export function holdLossW(room: RoomConfig, targetC: number): number {
   const wall = wallU(room.wall);
+  const roof = roofU(room.roof);
   let ua = 0;
   for (const { id } of SIDES) {
     const len = wallLength(room, id);
+    // The top edge of the section is the roof; the bottom edge is the floor.
+    const base = id === 'top' ? roof : wall;
     let openLen = 0;
     for (const o of room.openings) {
       if (o.side !== id) continue;
       openLen += o.length;
       ua += openingU(o) * o.length;
     }
-    ua += wall * Math.max(0, len - openLen);
+    ua += base * Math.max(0, len - openLen);
   }
-  return ua * room.ceilingM * (targetC - room.outsideC);
+  const dT = targetC - room.outsideC;
+  // Edges of the section are strips as long as the room; the front and back walls are width × height.
+  const frontBack = 2 * wall * room.widthM * room.ceilingM;
+  return (ua * room.heightM + frontBack) * dT;
 }
 
 /**
@@ -200,8 +256,8 @@ export function holdPowerKW(
   return { kW: Math.round(clamped * 100) / 100, reachable: Math.abs(clamped - kW) < 0.005 };
 }
 
-export function wallLength(room: Pick<RoomConfig, 'widthM' | 'heightM'>, side: WallSide): number {
-  return side === 'top' || side === 'bottom' ? room.widthM : room.heightM;
+export function wallLength(room: Pick<RoomConfig, 'widthM' | 'ceilingM'>, side: WallSide): number {
+  return side === 'top' || side === 'bottom' ? room.widthM : room.ceilingM;
 }
 
 export function nextId(items: ReadonlyArray<{ id: number }>): number {
@@ -238,8 +294,20 @@ export function sanitizeWall(w: Partial<WallConfig> | undefined): WallConfig {
   };
 }
 
+function sanitizeRoof(r: Partial<RoofConfig> | undefined): RoofConfig {
+  return {
+    pitchDeg: clamp(r?.pitchDeg ?? DEFAULT_ROOF.pitchDeg, LIMITS.pitch.min, LIMITS.pitch.max),
+    insulationM: clamp(
+      r?.insulationM ?? DEFAULT_ROOF.insulationM,
+      LIMITS.roofInsulation.min,
+      LIMITS.roofInsulation.max,
+    ),
+    material: pick(r?.material, ROOF_MATERIALS.map((m) => m.id), DEFAULT_ROOF.material),
+  };
+}
+
 /** Clamp every value into its valid range and drop malformed entries. Accepts untrusted input. */
-export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
+export function sanitizeRoom(c: Partial<Omit<RoomConfig, 'roof'>> & { roof?: Partial<RoofConfig> }): RoomConfig {
   const widthM = clamp(c.widthM, LIMITS.size.min, LIMITS.size.max);
   const heightM = clamp(c.heightM, LIMITS.size.min, LIMITS.size.max);
   const ceilingM = clamp(c.ceilingM ?? DEFAULT_ROOM.ceilingM, LIMITS.size.min, LIMITS.size.max);
@@ -250,15 +318,15 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
       id: s.id as number,
       kind: pick(s.kind, SOURCE_KINDS, 'heat'),
       x: clamp(s.x, 0, widthM),
-      y: clamp(s.y, 0, heightM),
+      y: clamp(s.y, 0, ceilingM),
       powerKW: clamp(s.powerKW, LIMITS.power.min, LIMITS.power.max),
     })),
   );
 
   const openings = withIds(
     entries<Opening>(c.openings, LIMITS.openings).map((o) => {
-      const side = pick(o.side, sideIds, 'top');
-      const wl = wallLength({ widthM, heightM }, side);
+      const side = pick(o.side, openingSideIds, 'left');
+      const wl = wallLength({ widthM, ceilingM }, side);
       const length = clamp(o.length, LIMITS.openingLength.min, Math.max(LIMITS.openingLength.min, wl - 0.2));
       return {
         id: o.id as number,
@@ -275,7 +343,7 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
     entries<Probe>(c.probes, LIMITS.probes).map((p) => ({
       id: p.id as number,
       x: clamp(p.x, 0, widthM),
-      y: clamp(p.y, 0, heightM),
+      y: clamp(p.y, 0, ceilingM),
     })),
   );
 
@@ -286,6 +354,7 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
     outsideC,
     convection: c.convection === true,
     wall: sanitizeWall(c.wall),
+    roof: sanitizeRoof(c.roof),
     sources,
     openings,
     probes,

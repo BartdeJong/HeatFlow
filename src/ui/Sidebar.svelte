@@ -13,18 +13,22 @@
     SPEEDS,
     updateOpening,
     updateRoom,
+    updateRoof,
     updateSource,
     updateWall,
   } from '../state/app.svelte';
   import {
     INSULATIONS,
     LIMITS,
-    SIDES,
+    ROOF_MATERIALS,
+    OPENING_SIDES,
     WALL_MATERIALS,
     holdPowerKW,
+    roofU,
     wallLength,
     wallU,
     type InsulationId,
+    type RoofMaterialId,
     type WallMaterialId,
     type WallSide,
   } from '../sim/config';
@@ -50,6 +54,7 @@
   }
   const names = $derived(Object.keys(saved).sort());
   const wallUValue = $derived(wallU(app.room.wall));
+  const roofUValue = $derived(roofU(app.room.roof));
   const selectedSource = $derived(
     app.selection?.kind === 'source'
       ? app.room.sources.find((s) => s.id === app.selection!.id)
@@ -148,10 +153,14 @@
         checked={app.room.convection}
         onchange={(e) => updateRoom({ convection: e.currentTarget.checked })}
       />
-      Convection (hot air rises)
+      Air currents (hot air rises)
+    </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={app.exterior} />
+      House exterior (walls &amp; roof)
     </label>
     {#if app.room.convection}
-      <p class="hint">The room is shown as a side view (up is up). Toggling this restarts the simulation.</p>
+      <p class="hint">Warm air rises in this side view. Toggling this restarts the simulation.</p>
     {/if}
   </fieldset>
 
@@ -246,6 +255,44 @@
   </fieldset>
 
   <fieldset>
+    <legend>Roof</legend>
+    <label>
+      Covering
+      <select
+        value={app.room.roof.material}
+        onchange={(e) => updateRoof({ material: e.currentTarget.value as RoofMaterialId })}
+      >
+        {#each ROOF_MATERIALS as m}<option value={m.id}>{m.label}</option>{/each}
+      </select>
+    </label>
+    <label>
+      <span>Pitch <output>{app.room.roof.pitchDeg.toFixed(0)}°</output></span>
+      <input
+        type="range"
+        min={LIMITS.pitch.min}
+        max={LIMITS.pitch.max}
+        step={LIMITS.pitch.step}
+        value={app.room.roof.pitchDeg}
+        oninput={(e) => updateRoof({ pitchDeg: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Roof insulation <output>{(app.room.roof.insulationM * 100).toFixed(0)} cm</output></span>
+      <input
+        type="range"
+        min={LIMITS.roofInsulation.min}
+        max={LIMITS.roofInsulation.max}
+        step={LIMITS.roofInsulation.step}
+        value={app.room.roof.insulationM}
+        oninput={(e) => updateRoof({ insulationM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <p class="hint">
+      Roof U-value <output>{roofUValue.toFixed(2)} W/m²K</output>. The covering is visual only.
+    </p>
+  </fieldset>
+
+  <fieldset>
     <legend>Windows &amp; doors</legend>
     <div class="row">
       <button onclick={() => addOpening('window')} disabled={app.room.openings.length >= LIMITS.openings}>
@@ -277,7 +324,7 @@
             value={o.side}
             onchange={(e) => updateOpening(o.id, { side: e.currentTarget.value as WallSide })}
           >
-            {#each SIDES as s}<option value={s.id}>{s.label}</option>{/each}
+            {#each OPENING_SIDES as s}<option value={s.id}>{s.label}</option>{/each}
           </select>
         </label>
         <label>
@@ -304,7 +351,7 @@
         </label>
       </div>
     {/each}
-    <p class="hint">Click a window or door on the room wall to open or close it. Open ones lose a lot of heat.</p>
+    <p class="hint">Windows and doors sit in the left or right wall. Click one on the wall to open or close it. Open ones lose a lot of heat.</p>
   </fieldset>
 
   <fieldset>
@@ -333,18 +380,7 @@
       />
     </label>
     <label>
-      <span>{app.room.convection ? 'Height' : 'Length'} <output>{app.room.heightM.toFixed(1)} m</output></span>
-      <input
-        type="range"
-        min={LIMITS.size.min}
-        max={LIMITS.size.max}
-        step={LIMITS.size.step}
-        value={app.room.heightM}
-        oninput={(e) => updateRoom({ heightM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <label>
-      <span>{app.room.convection ? 'Length (depth)' : 'Ceiling height'} <output>{app.room.ceilingM.toFixed(1)} m</output></span>
+      <span>Ceiling height <output>{app.room.ceilingM.toFixed(1)} m</output></span>
       <input
         type="range"
         min={LIMITS.size.min}
@@ -352,6 +388,17 @@
         step={LIMITS.size.step}
         value={app.room.ceilingM}
         oninput={(e) => updateRoom({ ceilingM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Length (depth) <output>{app.room.heightM.toFixed(1)} m</output></span>
+      <input
+        type="range"
+        min={LIMITS.size.min}
+        max={LIMITS.size.max}
+        step={LIMITS.size.step}
+        value={app.room.heightM}
+        oninput={(e) => updateRoom({ heightM: e.currentTarget.valueAsNumber })}
       />
     </label>
     <label>
@@ -365,7 +412,7 @@
         oninput={(e) => updateRoom({ outsideC: e.currentTarget.valueAsNumber })}
       />
     </label>
-    <p class="hint">Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
+    <p class="hint">The room is shown from the side; length is the depth into the screen. Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
   </fieldset>
 
   <fieldset>

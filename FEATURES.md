@@ -61,6 +61,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Real-time (1×) and 10× simulation speeds
 - ✅ Adjustable room length, width and ceiling height
 - ✅ Adjustable outside temperature
+- ✅ House exterior toggle (Display, side view): illustrated gable-roof cutaway with pitch-scaled coverings, visible insulation, eave details, chimney, pastel sky and clouds, trees, grass, path and split picket fence
+- ⬜ House exterior extras (behind the same toggle, not done yet): facade windows/doors, porch steps, sun, seasonal weather, heat-loss glow
+- ✅ Roof: pitch, insulation thickness (adds real ceiling heat loss) and covering (visual only); saved in share links
+- ⬜ Not done yet: other roof shapes (hip, flat), garage/porch
 
 ## Add-later (all ⬜)
 - Humidity & moisture

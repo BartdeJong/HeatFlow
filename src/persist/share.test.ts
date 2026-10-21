@@ -9,12 +9,13 @@ const full: RoomConfig = {
   outsideC: -7,
   convection: true,
   wall: { material: 'wood', thicknessM: 0.15, insulation: 'pir', insulationM: 0.08 },
+  roof: { pitchDeg: 48, insulationM: 0.22, material: 'slate' },
   sources: [
-    { id: 1, kind: 'heat', x: 1.2, y: 3, powerKW: 2.4 },
+    { id: 1, kind: 'heat', x: 1.2, y: 2, powerKW: 2.4 },
     { id: 2, kind: 'cold', x: 5, y: 1, powerKW: 0.8 },
   ],
   openings: [
-    { id: 1, kind: 'window', side: 'top', pos: 3, length: 1.5, open: true },
+    { id: 1, kind: 'window', side: 'right', pos: 1, length: 1.5, open: true },
     { id: 2, kind: 'door', side: 'left', pos: 1.6, length: 0.9, open: false },
   ],
   probes: [{ id: 1, x: 2, y: 1 }],
@@ -39,11 +40,11 @@ describe('share', () => {
 
   it('defaults the ceiling for links without one', () => {
     const arr = JSON.parse(atob(encodeRoom(DEFAULT_ROOM).replace(/-/g, '+').replace(/_/g, '/')));
-    arr.pop();
-    arr.pop();
+    for (let i = 0; i < 5; i++) arr.pop();
     const room = decodeRoom(btoa(JSON.stringify(arr)))!;
     expect(room.ceilingM).toBe(2.5);
     expect(room.outsideC).toBe(0);
+    expect(room.roof).toEqual(DEFAULT_ROOM.roof);
   });
 
   it('rejects garbage', () => {
@@ -63,7 +64,7 @@ describe('share', () => {
     expect(room.wall.material).toBe('brick');
     expect(room.sources[0].powerKW).toBe(10);
     expect(room.sources[0].kind).toBe('heat');
-    expect(room.openings[0].side).toBe('top');
+    expect(room.openings[0].side).toBe('left');
     expect(room.probes[0].x).toBe(10);
   });
 

@@ -2,6 +2,7 @@ import {
   DEFAULT_ROOM,
   INSULATIONS,
   OPENING_KINDS,
+  ROOF_MATERIALS,
   SIDES,
   SOURCE_KINDS,
   WALL_MATERIALS,
@@ -38,6 +39,9 @@ export function encodeRoom(room: RoomConfig): string {
     room.probes.map((p) => [r(p.x), r(p.y)]),
     r(room.ceilingM),
     r(room.outsideC),
+    r(room.roof.pitchDeg),
+    r(room.roof.insulationM),
+    ROOF_MATERIALS.findIndex((m) => m.id === room.roof.material),
   ];
   const b64 = btoa(JSON.stringify(arr));
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -66,7 +70,7 @@ export function decodeRoom(code: string): RoomConfig | null {
       return legacyRoom(w, h, p, u, sx, sy);
     }
 
-    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 13) return null;
+    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 16) return null;
     const head = arr.slice(1, 8);
     if (!allNums(head)) return null;
     const [widthM, heightM, conv, mat, thick, ins, insM] = head as number[];
@@ -74,16 +78,17 @@ export function decodeRoom(code: string): RoomConfig | null {
     const openings = rows(arr[9], 5);
     const probes = rows(arr[10], 2);
     if (!sources || !openings || !probes) return null;
-    if (arr.length >= 12 && !isNum(arr[11])) return null;
-    if (arr.length === 13 && !isNum(arr[12])) return null;
-    const ceilingM = arr.length >= 12 ? (arr[11] as number) : undefined;
-    const outsideC = arr.length === 13 ? (arr[12] as number) : undefined;
+    // Optional trailing fields, appended over time: ceiling, outside, roof pitch, roof insulation, roof material.
+    const extra = arr.slice(11);
+    if (!allNums(extra)) return null;
+    const [ceilingM, outsideC, pitchDeg, roofInsM, roofMat] = extra as (number | undefined)[];
 
     return sanitizeRoom({
       widthM,
       heightM,
       ceilingM,
       outsideC,
+      roof: { pitchDeg, insulationM: roofInsM, material: ROOF_MATERIALS[roofMat ?? -1]?.id },
       convection: conv === 1,
       wall: {
         material: WALL_MATERIALS[mat]?.id,

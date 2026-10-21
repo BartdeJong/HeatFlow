@@ -72,6 +72,12 @@ describe('Simulation', () => {
     expect(hold.reachable).toBe(false);
   });
 
+  it('hold power accounts for the roof insulation', () => {
+    const thin = room({ roof: { ...DEFAULT_ROOM.roof, insulationM: 0 } });
+    const thick = room({ roof: { ...DEFAULT_ROOM.roof, insulationM: 0.3 } });
+    expect(holdPowerKW(thin, 1, 20)!.kW).toBeGreaterThan(holdPowerKW(thick, 1, 20)!.kW + 1);
+  });
+
   it('a warm day outside heats a room that has no sources', () => {
     const sim = new Simulation(room({ sources: [], outsideC: 35 }));
     sim.advance(3600);
@@ -170,7 +176,7 @@ describe('convection', () => {
   it('hot air rises: above a heater is warmer than the same distance below', () => {
     const sources = [{ id: 1, kind: 'heat' as const, x: 2, y: 3, powerKW: 3 }];
     const params = { ...DEFAULT_PHYSICS, massFactor: 1 };
-    const r = room({ widthM: 4, heightM: 4, sources });
+    const r = room({ widthM: 4, heightM: 4, ceilingM: 4, sources });
     const flat = new Simulation(r, params);
     const conv = new Simulation({ ...r, convection: true }, params);
     flat.advance(300);
@@ -225,9 +231,9 @@ describe('config helpers', () => {
     expect(c.sources[1]).toMatchObject({ kind: 'heat', powerKW: 10 });
     expect(new Set(c.sources.map((s) => s.id)).size).toBe(2);
     const o = c.openings[0];
-    expect(o.length).toBeLessThanOrEqual(1.8);
+    expect(o.length).toBeLessThanOrEqual(2.5);
     expect(o.pos - o.length / 2).toBeGreaterThanOrEqual(0);
-    expect(o.pos + o.length / 2).toBeLessThanOrEqual(2);
+    expect(o.pos + o.length / 2).toBeLessThanOrEqual(2.5);
   });
 
   it('caps the number of items', () => {

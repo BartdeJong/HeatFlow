@@ -6,6 +6,7 @@ import {
   type HeatSource,
   type Opening,
   type OpeningKind,
+  type RoofConfig,
   type RoomConfig,
   type SourceKind,
   type WallConfig,
@@ -27,6 +28,8 @@ export const app = $state({
   running: true,
   speed: 300 as number,
   palette: 'heat' as PaletteId,
+  /** Draw the walls and the gable roof around the room section. */
+  exterior: false,
   selection: null as Selection,
   /** Incremented to request a simulation reset. */
   resetToken: 0,
@@ -52,6 +55,10 @@ export function updateRoom(
 
 export function updateWall(patch: Partial<WallConfig>): void {
   edit((r) => Object.assign(r.wall, patch));
+}
+
+export function updateRoof(patch: Partial<RoofConfig>): void {
+  edit((r) => Object.assign(r.roof, patch));
 }
 
 export function setRoom(room: RoomConfig): void {
@@ -88,7 +95,7 @@ export function addSource(kind: SourceKind): void {
       id,
       kind,
       x: r.widthM * fx,
-      y: r.heightM * fy,
+      y: r.ceilingM * fy,
       powerKW: kind === 'heat' ? 1.5 : 1,
     });
   });
@@ -116,9 +123,10 @@ export function addOpening(kind: OpeningKind): void {
     r.openings.push({
       id,
       kind,
-      side: 'top',
-      pos: r.widthM / 2,
-      length: kind === 'window' ? 1.2 : 0.9,
+      side: 'left',
+      // Doors stand on the floor, windows sit around the middle of the wall.
+      pos: kind === 'window' ? r.ceilingM * 0.55 : r.ceilingM - 1,
+      length: kind === 'window' ? 1.2 : 2,
       open: false,
     });
   });
@@ -143,7 +151,7 @@ export function addProbe(): void {
   if (app.room.probes.length >= LIMITS.probes) return;
   const id = nextId(app.room.probes);
   edit((r) => {
-    r.probes.push({ id, x: r.widthM * (0.2 + 0.25 * (id - 1)), y: r.heightM * 0.25 });
+    r.probes.push({ id, x: r.widthM * (0.2 + 0.25 * (id - 1)), y: r.ceilingM * 0.25 });
   });
   app.selection = { kind: 'probe', id };
 }
