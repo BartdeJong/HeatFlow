@@ -1,8 +1,20 @@
-import { DEFAULT_ROOM, sanitizeRoom, type RoomConfig } from '../sim/config';
+import {
+  DEFAULT_ROOM,
+  INSULATIONS,
+  OPENING_KINDS,
+  SIDES,
+  SOURCE_KINDS,
+  WALL_MATERIALS,
+  legacyRoom,
+  sanitizeRoom,
+  type RoomConfig,
+} from '../sim/config';
 
-const VERSION = 1;
+const VERSION = 2;
 
 const r = (v: number, d = 3) => Number(v.toFixed(d));
+const isNum = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+const allNums = (a: unknown[]) => a.every(isNum);
 
 /** Encode a room as a compact URL-safe string. */
 export function encodeRoom(room: RoomConfig): string {
@@ -10,13 +22,35 @@ export function encodeRoom(room: RoomConfig): string {
     VERSION,
     r(room.widthM),
     r(room.heightM),
-    r(room.powerKW),
-    r(room.uValue),
-    r(room.sourceX),
-    r(room.sourceY),
+    room.convection ? 1 : 0,
+    WALL_MATERIALS.findIndex((m) => m.id === room.wall.material),
+    r(room.wall.thicknessM),
+    INSULATIONS.findIndex((m) => m.id === room.wall.insulation),
+    r(room.wall.insulationM),
+    room.sources.map((s) => [SOURCE_KINDS.indexOf(s.kind), r(s.x), r(s.y), r(s.powerKW)]),
+    room.openings.map((o) => [
+      OPENING_KINDS.indexOf(o.kind),
+      SIDES.findIndex((s) => s.id === o.side),
+      r(o.pos),
+      r(o.length),
+      o.open ? 1 : 0,
+    ]),
+    room.probes.map((p) => [r(p.x), r(p.y)]),
+    r(room.ceilingM),
+    r(room.outsideC),
   ];
   const b64 = btoa(JSON.stringify(arr));
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function rows(v: unknown, width: number): number[][] | null {
+  if (!Array.isArray(v)) return null;
+  const out: number[][] = [];
+  for (const row of v) {
+    if (!Array.isArray(row) || row.length !== width || !allNums(row)) return null;
+    out.push(row as number[]);
+  }
+  return out;
 }
 
 /** Decode and validate; returns null if the input is not a valid room. */
@@ -24,11 +58,56 @@ export function decodeRoom(code: string): RoomConfig | null {
   try {
     const b64 = code.replace(/-/g, '+').replace(/_/g, '/');
     const arr: unknown = JSON.parse(atob(b64));
-    if (!Array.isArray(arr) || arr.length !== 7 || arr[0] !== VERSION) return null;
-    const nums = arr.slice(1);
-    if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
-    const [widthM, heightM, powerKW, uValue, sourceX, sourceY] = nums as number[];
-    return sanitizeRoom({ widthM, heightM, powerKW, uValue, sourceX, sourceY });
+    if (!Array.isArray(arr)) return null;
+
+    if (arr[0] === 1) {
+      if (arr.length !== 7 || !allNums(arr)) return null;
+      const [, w, h, p, u, sx, sy] = arr as number[];
+      return legacyRoom(w, h, p, u, sx, sy);
+    }
+
+    if (arr[0] !== VERSION || arr.length < 11 || arr.length > 13) return null;
+    const head = arr.slice(1, 8);
+    if (!allNums(head)) return null;
+    const [widthM, heightM, conv, mat, thick, ins, insM] = head as number[];
+    const sources = rows(arr[8], 4);
+    const openings = rows(arr[9], 5);
+    const probes = rows(arr[10], 2);
+    if (!sources || !openings || !probes) return null;
+    if (arr.length >= 12 && !isNum(arr[11])) return null;
+    if (arr.length === 13 && !isNum(arr[12])) return null;
+    const ceilingM = arr.length >= 12 ? (arr[11] as number) : undefined;
+    const outsideC = arr.length === 13 ? (arr[12] as number) : undefined;
+
+    return sanitizeRoom({
+      widthM,
+      heightM,
+      ceilingM,
+      outsideC,
+      convection: conv === 1,
+      wall: {
+        material: WALL_MATERIALS[mat]?.id,
+        thicknessM: thick,
+        insulation: INSULATIONS[ins]?.id,
+        insulationM: insM,
+      },
+      sources: sources.map(([k, x, y, powerKW], i) => ({
+        id: i + 1,
+        kind: SOURCE_KINDS[k],
+        x,
+        y,
+        powerKW,
+      })),
+      openings: openings.map(([k, s, pos, length, open], i) => ({
+        id: i + 1,
+        kind: OPENING_KINDS[k],
+        side: SIDES[s]?.id,
+        pos,
+        length,
+        open: open === 1,
+      })),
+      probes: probes.map(([x, y], i) => ({ id: i + 1, x, y })),
+    });
   } catch {
     return null;
   }

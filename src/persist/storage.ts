@@ -1,4 +1,4 @@
-import { sanitizeRoom, type RoomConfig } from '../sim/config';
+import { coerceRoom, type RoomConfig } from '../sim/config';
 
 const KEY = 'heatflow.rooms.v1';
 
@@ -12,17 +12,8 @@ export function listSavedRooms(): SavedRooms {
     if (typeof parsed !== 'object' || parsed === null) return {};
     const out: SavedRooms = Object.create(null);
     for (const [name, v] of Object.entries(parsed)) {
-      const c = v as Partial<RoomConfig>;
-      if (
-        typeof c?.widthM === 'number' &&
-        typeof c.heightM === 'number' &&
-        typeof c.powerKW === 'number' &&
-        typeof c.uValue === 'number' &&
-        typeof c.sourceX === 'number' &&
-        typeof c.sourceY === 'number'
-      ) {
-        out[name] = sanitizeRoom(c as RoomConfig);
-      }
+      const room = coerceRoom(v);
+      if (room) out[name] = room;
     }
     return out;
   } catch {

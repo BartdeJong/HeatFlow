@@ -41,7 +41,7 @@ Simulation core is independent of UI so it is unit-testable (Vitest) and later s
 ## Risks
 - Float texture support on mobile → half-float / RGBA8 packing fallback.
 - Explicit solver stability at large resolution → adaptive substeps + grid cap.
-- Pure 2D diffusion ignores convection; labelled clearly as a simplified model.
+- Diffusion-only by default; an optional simplified convection mode (side view) was added later. Both are labelled as simplified models.
 
 ## Open decisions (defaults chosen, change if you disagree)
 - Outside temperature fixed at 0 °C, adjustable later.

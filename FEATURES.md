@@ -14,7 +14,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Single heat source (drag-and-drop point source; also keyboard arrows)
 - ✅ Adjustable heat source output (kW)
 - ✅ 2D room geometry, adjustable width/height (2–10 m)
-- ✅ Walls only, uniform insulation value (U-value)
+- ✅ Walls with a uniform insulation value (now derived from material + insulation layers)
 - ✅ 2D grid thermal diffusion model (explicit finite difference, stable dt, unit-tested)
 - ✅ Real-time heatmap (smooth, bilinear-filtered gradient with adaptive scale)
 
@@ -42,16 +42,27 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ⬜ Real-device mobile performance check
 
 ## Known limitations
-- Pure diffusion: no convection (hot air does not rise).
-- Outside temperature fixed at 0 °C; room starts at 20 °C.
+- Convection is a simplified 2D side-section model (coarser 64-cell grid, not CFD); toggling it restarts the simulation.
+- Cold sources are plain heat sinks (AC / draught) with no thermostat setpoint.
+- Open windows/doors are modelled as a high loss coefficient, not real airflow.
+- Palette choice is not saved or shared.
+- Room starts at 20 °C; outside temperature is adjustable (−30…40 °C) but constant over time.
 - Changing room size restarts the simulation.
 
+## Added after the MVP
+- ✅ Windows & doors with open/closed state (click them on the wall or use the sidebar)
+- ✅ Multiple heat sources (up to 8)
+- ✅ Cold sources (AC, drafts, leaks)
+- ✅ Wall materials (brick, concrete, wood, aerated concrete) + thickness + insulation type/thickness
+- ✅ Convective airflow (hot air rises; buoyancy + pressure projection)
+- ✅ Thermal camera palette
+- ✅ Overlay graph: temperature over time (room average + up to 3 draggable probes)
+- ✅ Share/save format v2 (old links and saves still load)
+- ✅ Real-time (1×) and 10× simulation speeds
+- ✅ Adjustable room length, width and ceiling height
+- ✅ Adjustable outside temperature
+
 ## Add-later (all ⬜)
-- Windows & doors (insulation, open/closed)
-- Multiple heat sources
-- Cold sources (AC, drafts, leaks)
-- Wall materials
-- Convective airflow
 - Humidity & moisture
 - 3D simulation
 - Custom room shapes / multi-room
@@ -59,8 +70,6 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - Multi-floor
 - Vector field arrows
 - Time-lapse playback
-- Thermal camera palette
-- Overlay graphs
 - Floor plan import
 - Insulation database
 - IoT sensors
