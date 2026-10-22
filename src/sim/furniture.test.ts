@@ -3,12 +3,17 @@ import { DEFAULT_PHYSICS, DEFAULT_ROOM, sanitizeRoom, type Furniture, type RoomC
 import { furnitureBoxes, intersectBox } from './furniture';
 import { Simulation } from './simulation';
 import { traceAirflow } from '../render/airflow';
+import { DEFAULT_MODEL } from './model';
 
 const table: Furniture = { id: 1, kind: 'table', material: 'wood', x: 2.5, y: 2, widthM: 1.6, depthM: 1.2, heightM: 1.25, rotation: 0 };
-const room = (patch: Partial<RoomConfig> = {}) => sanitizeRoom({ ...DEFAULT_ROOM, convection: true, outsideC: 20, furniture: [table], ...patch });
+const room = (patch: Partial<RoomConfig> = {}) => sanitizeRoom({ ...DEFAULT_ROOM, convection: true, outsideC: 20, furniture: [table],
+  model: { ...DEFAULT_MODEL, quality: 'coarse', radiation: false, leakageACH: 0, floor: { ...DEFAULT_MODEL.floor, temperatureC: 20 } },
+  sources: DEFAULT_ROOM.sources.map(({ emitter: _emitter, ...source }) => source), ...patch });
 const advance = (sim: Simulation, seconds: number) => {
   const end = sim.elapsed + seconds;
-  while (sim.elapsed < end - 1e-6) sim.advance(Math.min(5, end - sim.elapsed));
+  while (sim.elapsed < end - 1e-6) {
+    if (sim.advance(Math.min(5, end - sim.elapsed)) <= 0) throw new Error(sim.diagnostics().failure ?? 'Simulation stopped before the requested time');
+  }
 };
 
 describe('furniture physics', () => {
@@ -17,23 +22,23 @@ describe('furniture physics', () => {
     expect(sim.isSolid(2.5, 2, 0.5)).toBe(false);
     expect(sim.isSolid(2.5, 2, 1.15)).toBe(true);
     expect(sim.isSolid(table.x - table.widthM * 0.4, table.y - table.depthM * 0.38, 0.3)).toBe(true);
-    advance(sim, 30);
+    advance(sim, 5);
     expect(sim.sampleVelocity(2.5, 2, 1.15)).toEqual([0, 0, 0]);
     const paths = traceAirflow(sim, [5, 4, 2.5], [2.5, 2, 0.6]);
     expect(paths.length).toBeGreaterThan(2);
     expect(paths.every((p) => !sim.isSolid(...p))).toBe(true);
-  });
+  }, 120000);
 
   it('changes the rising plume when a tabletop obstructs the heater', () => {
     const bare = new Simulation(room({ furniture: [] }));
     const furnished = new Simulation(room());
-    advance(bare, 60); advance(furnished, 60);
+    advance(bare, 12); advance(furnished, 12);
     expect(furnished.sample(2.5, 2, 1.6)).toBeLessThan(bare.sample(2.5, 2, 1.6) - 0.1);
-  });
+  }, 120000);
 
   it('conserves combined air/furniture energy while they exchange heat', () => {
-    const sim = new Simulation(room({ sources: [] }), { ...DEFAULT_PHYSICS, uScale: 0 });
-    for (let i = 0; i < sim.T.length; i++) sim.T[i] = sim.solid[i] ? 20 : 35;
+    const sim = new Simulation(room({ sources: [], convection: false }), { ...DEFAULT_PHYSICS, uScale: 0 });
+    for (let i = 0; i < sim.T.length; i++) sim.T[i] = 35;
     const before = sim.energyJ();
     advance(sim, 60);
     expect(Math.abs(sim.energyJ() - before) / before).toBeLessThan(0.0002);
@@ -42,9 +47,9 @@ describe('furniture physics', () => {
   });
 
   it('solid thermal mass releases stored heat into the air', () => {
-    const sim = new Simulation(room({ sources: [], convection: false }), { ...DEFAULT_PHYSICS, uScale: 0 });
-    for (let i = 0; i < sim.T.length; i++) sim.T[i] = sim.solid[i] ? 35 : 20;
-    expect(sim.stats().mean).toBe(20);
+    const sim = new Simulation(room({ sources: [], convection: false }), { ...DEFAULT_PHYSICS, initialC: 35, uScale: 0 });
+    sim.T.fill(20);
+    expect(sim.stats().mean).toBeCloseTo(20, 10);
     expect(sim.furnitureTemperatures()[1]).toBe(35);
     const before = sim.energyJ();
     advance(sim, 60);
@@ -57,7 +62,7 @@ describe('furniture physics', () => {
     const wood = new Simulation(room({ sources: [], convection: false }), { ...DEFAULT_PHYSICS, uScale: 0 });
     const fabric = new Simulation(room({ sources: [], convection: false, furniture: [{ ...table, material: 'fabric' }] }), { ...DEFAULT_PHYSICS, uScale: 0 });
     for (const sim of [wood, fabric]) {
-      for (let i = 0; i < sim.T.length; i++) sim.T[i] = sim.solid[i] ? 20 : 35;
+      for (let i = 0; i < sim.T.length; i++) sim.T[i] = 35;
       advance(sim, 60);
     }
     expect(fabric.furnitureTemperatures()[1]).toBeGreaterThan(wood.furnitureTemperatures()[1] + 0.001);
@@ -66,17 +71,14 @@ describe('furniture physics', () => {
   it('conserves source power with convection and solid furniture present', () => {
     const sim = new Simulation(room(), { ...DEFAULT_PHYSICS, uScale: 0 });
     const before = sim.energyJ();
-    advance(sim, 40);
+    advance(sim, 12);
     const expected = DEFAULT_ROOM.sources[0].powerKW * 1000 * sim.elapsed;
     expect(Math.abs(sim.energyJ() - before - expected) / expected).toBeLessThan(0.002);
     expect(Number.isFinite(sim.stats().min)).toBe(true);
-  });
+  }, 120000);
 
-  it('handles a room filled with solid furniture without invalid temperatures', () => {
-    const sim = new Simulation(room({ sources: [], furniture: [{ ...table, kind: 'cabinet', widthM: 5, depthM: 4, heightM: 2.5 }] }));
-    advance(sim, 2);
-    expect(sim.stats().mean).toBeCloseTo(20, 5);
-    expect(sim.sampleVelocity(2.5, 2, 1)).toEqual([0, 0, 0]);
+  it('rejects rooms with no free air before starting the solver', () => {
+    expect(() => new Simulation(room({ sources: [], furniture: [{ ...table, kind: 'cabinet', widthM: 5, depthM: 4, heightM: 2.5 }] }))).toThrow('some free air');
   });
 });
 

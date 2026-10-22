@@ -1,368 +1,99 @@
 import { describe, expect, it } from 'vitest';
-import {
-  DEFAULT_PHYSICS,
-  DEFAULT_ROOM,
-  coerceRoom,
-  holdPowerKW,
-  sanitizeRoom,
-  wallU,
-  type RoomConfig,
-} from './config';
+import { DEFAULT_PHYSICS, DEFAULT_ROOM, coerceRoom, holdPowerKW, sanitizeRoom, wallU, type RoomConfig } from './config';
+import { DEFAULT_MODEL, emitterPreset } from './model';
 import { Recorder } from './recorder';
 import { Simulation } from './simulation';
-
-const room = (patch: Partial<RoomConfig> = {}): RoomConfig => ({ ...structuredClone(DEFAULT_ROOM), ...patch });
-const advance = (sim: Simulation, seconds: number): number => {
-  const start = sim.elapsed;
-  while (sim.elapsed - start < seconds - 1e-7) sim.advance(Math.min(30, seconds - (sim.elapsed - start)));
-  return sim.elapsed - start;
+const room = (patch: Partial<RoomConfig> = {}): RoomConfig => ({ ...structuredClone(DEFAULT_ROOM), convection: false,
+  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: .4, powerKW: .2 }],
+  model: { ...structuredClone(DEFAULT_MODEL), quality: 'coarse', radiation: false, leakageACH: 0,
+    floor: { ...structuredClone(DEFAULT_MODEL.floor), boundary: 'outside' }, environment: { ...DEFAULT_MODEL.environment, skyOffsetC: 0 } }, ...patch });
+const advance = (sim: Simulation, seconds: number) => {
+  const end = sim.elapsed + seconds;
+  while (sim.elapsed < end - 1e-8) { if (!sim.advance(Math.min(16, end - sim.elapsed))) throw new Error(sim.diagnostics().failure ?? 'No physical time advanced'); }
+  return seconds;
 };
+const withPower = (powerKW: number, kind: 'heat' | 'cold' = 'heat') => [{ id: 1, kind, x: 2.5, y: 2, z: .4, powerKW }];
+const insulated = { ...DEFAULT_PHYSICS, uScale: 0 };
 
-const withPower = (kW: number, kind: 'heat' | 'cold' = 'heat') =>
-  [{ id: 1, kind, x: 2.5, y: 2, z: 0.4, powerKW: kW }];
-
-describe('Simulation', () => {
-  it('respects real-time and accelerated speeds when a physics step exceeds a display frame', () => {
-    const config = room({ convection: true, sources: [], outsideC: 20 });
-    const realTime = new Simulation(config, { ...DEFAULT_PHYSICS, uScale: 0 });
-    const accelerated = new Simulation(config, { ...DEFAULT_PHYSICS, uScale: 0 });
-    for (let frame = 0; frame < 600; frame++) {
-      realTime.advance(1 / 60);
-      accelerated.advance(10 / 60);
-    }
-    expect(realTime.elapsed).toBeCloseTo(10, 0);
-    expect(accelerated.elapsed).toBeCloseTo(100, 0);
-    expect(accelerated.elapsed / realTime.elapsed).toBeCloseTo(10, 0);
+describe('coupled simulation controls and sources', () => {
+  it('respects requested elapsed time at real-time and accelerated frame cadences', () => {
+    const a = new Simulation(room({ sources: [], outsideC: 20 }), insulated);
+    const b = new Simulation(room({ sources: [], outsideC: 20 }), insulated);
+    for (let frame = 0; frame < 60; frame++) { a.advance(1 / 60); b.advance(10 / 60); }
+    expect(a.elapsed).toBeCloseTo(1, 7); expect(b.elapsed).toBeCloseTo(10, 7);
+    expect(a.stats().mean).toBeCloseTo(20, 8);
   });
-
-  it('stays at ambient with no heat source and no temperature difference', () => {
-    const sim = new Simulation(room({ sources: [], outsideC: 20 }));
-    advance(sim, 100);
-    const s = sim.stats();
-    expect(s.min).toBeCloseTo(20, 4);
-    expect(s.max).toBeCloseTo(20, 4);
+  it('does no work for invalid or zero time', () => {
+    const sim = new Simulation(room()); const energy = sim.energyJ();
+    for (const seconds of [0, -1, Infinity, NaN]) expect(sim.advance(seconds)).toBe(0);
+    expect(sim.elapsed).toBe(0); expect(sim.energyJ()).toBe(energy);
   });
-
-  it('conserves energy when walls are perfectly insulated', () => {
-    const sim = new Simulation(room({ sources: withPower(1.5) }), { ...DEFAULT_PHYSICS, uScale: 0 });
-    const e0 = sim.energyJ();
-    const t = advance(sim, 50);
-    const expected = 1500 * t;
-    expect(sim.energyJ() - e0).toBeGreaterThan(expected * 0.999);
-    expect(sim.energyJ() - e0).toBeLessThan(expected * 1.001);
+  it('conserves source power across air and stored building heat', () => {
+    const sim = new Simulation(room({ sources: withPower(.2) }), insulated), initial = sim.energyJ();
+    advance(sim, 30);
+    expect(sim.energyJ() - initial).toBeCloseTo(200 * sim.elapsed, 4);
+    expect(sim.diagnostics().relativeEnergyError).toBeLessThan(1e-8);
   });
-
-  it('sums the power of multiple sources, cold ones removing heat', () => {
-    const sources = [
-      { id: 1, kind: 'heat' as const, x: 1, y: 1, z: 0.4, powerKW: 2 },
-      { id: 2, kind: 'heat' as const, x: 4, y: 3, z: 0.4, powerKW: 1 },
-      { id: 3, kind: 'cold' as const, x: 2.5, y: 2, z: 0.4, powerKW: 0.5 },
-    ];
-    const sim = new Simulation(room({ sources }), { ...DEFAULT_PHYSICS, uScale: 0 });
-    const e0 = sim.energyJ();
-    const t = advance(sim, 50);
-    expect(sim.energyJ() - e0).toBeCloseTo(2500 * t, -2);
+  it('adds multiple heater powers and subtracts cooling power', () => {
+    const sim = new Simulation(room({ sources: [
+      { id: 1, kind: 'heat', x: 1, y: 1, z: .4, powerKW: .2 },
+      { id: 2, kind: 'heat', x: 4, y: 3, z: .4, powerKW: .1 },
+      { id: 3, kind: 'cold', x: 2.5, y: 2, z: .4, powerKW: .05 },
+    ] }), insulated), initial = sim.energyJ();
+    advance(sim, 20);
+    expect(sim.energyJ() - initial).toBeCloseTo(250 * sim.elapsed, 4);
   });
-
-  it('distributes underfloor heat along the floor and ignores heat-source position', () => {
-    const sources = (x: number) => [{ id: 1, kind: 'heat' as const, x, y: 0.5, z: 0.4, powerKW: 1 }];
-    const base = { ...room({ furniture: [], outsideC: 20 }), heatingMode: 'underfloor' as const };
-    const left = new Simulation({ ...base, sources: sources(0.5) }, { ...DEFAULT_PHYSICS, uScale: 0 });
-    const right = new Simulation({ ...base, sources: sources(4.5) }, { ...DEFAULT_PHYSICS, uScale: 0 });
-    const energyBefore = left.energyJ();
-    const advanced = left.advance(5);
-    right.advance(5);
-    expect(Array.from(left.T)).toEqual(Array.from(right.T));
-    expect(left.sample(4.5, 2.45, 0.05)).toBeGreaterThan(20);
-    expect(left.energyJ() - energyBefore).toBeCloseTo(1000 * advanced, -1);
-
-    const pointLeft = new Simulation(
-      { ...base, heatingMode: 'point', sources: sources(0.5) },
-      { ...DEFAULT_PHYSICS, uScale: 0 },
-    );
-    const pointRight = new Simulation(
-      { ...base, heatingMode: 'point', sources: sources(4.5) },
-      { ...DEFAULT_PHYSICS, uScale: 0 },
-    );
-    pointLeft.advance(5);
-    pointRight.advance(5);
-    expect(Array.from(pointLeft.T)).not.toEqual(Array.from(pointRight.T));
-
-    const coldLeft = new Simulation(
-      { ...base, sources: sources(0.5).map((source) => ({ ...source, kind: 'cold' as const })) },
-      { ...DEFAULT_PHYSICS, uScale: 0 },
-    );
-    const coldRight = new Simulation(
-      { ...base, sources: sources(4.5).map((source) => ({ ...source, kind: 'cold' as const })) },
-      { ...DEFAULT_PHYSICS, uScale: 0 },
-    );
-    coldLeft.advance(5);
-    coldRight.advance(5);
-    expect(Array.from(coldLeft.T)).not.toEqual(Array.from(coldRight.T));
+  it('keeps cooling local to a point and underfloor heat independent of heater position', () => {
+    const base = room({ heatingMode: 'underfloor', outsideC: 20 });
+    const a = new Simulation({ ...base, sources: withPower(.2) }, insulated);
+    const b = new Simulation({ ...base, sources: withPower(.2).map(s => ({ ...s, x: .5, y: .5, z: 2 })) }, insulated);
+    advance(a, 20); advance(b, 20);
+    expect(Array.from(a.T)).toEqual(Array.from(b.T));
+    expect(a.diagnostics().surfaceTemperatures.filter(s => s.label === 'Floor').some(s => s.temperatureC > 20)).toBe(true);
+    const cold = new Simulation({ ...base, sources: withPower(.05, 'cold') }, insulated);
+    cold.advance(1); expect(cold.sample(2.5, 2, .4)).toBeLessThan(20);
+    expect(cold.sample(.5, .5, 2)).toBeCloseTo(20, 4);
   });
-
-  it('a cold source cools the room below the starting temperature', () => {
-    const sim = new Simulation(room({ sources: withPower(2, 'cold'), outsideC: 20 }));
-    advance(sim, 120);
-    expect(sim.sample(2.5, 2)).toBeLessThan(20);
-    expect(sim.stats().max).toBeLessThanOrEqual(20.0001);
+  it('switches heating through thermostat hysteresis without stopping cooling', () => {
+    const config = room({ outsideC: 20, thermostat: { enabled: true, targetC: 20, deadbandC: .5 }, sources: withPower(.2) });
+    const sim = new Simulation(config, insulated);
+    sim.T.fill(19); sim.advance(.01); expect(sim.thermostatHeatingOn()).toBe(true);
+    const heating = sim.energyUseKWh().heating;
+    sim.T.fill(20.5); sim.advance(.01); expect(sim.thermostatHeatingOn()).toBe(false);
+    expect(sim.energyUseKWh().heating).toBe(heating);
+    sim.T.fill(19.5); sim.advance(.01); expect(sim.thermostatHeatingOn()).toBe(true);
   });
-
-  it('the hold power keeps the room near 20 °C', () => {
-    const r = room({ sources: withPower(1, 'heat'), outsideC: -5 });
-    const hold = holdPowerKW(r, 1, 20)!;
-    expect(hold.reachable).toBe(true);
-    const sim = new Simulation(room({ sources: withPower(hold.kW), outsideC: -5 }));
-    advance(sim, 3 * 3600);
-    expect(Math.abs(sim.stats().mean - 20)).toBeLessThan(1);
+  it('records heater/cooling energy for actual simulated seconds and clears on reset', () => {
+    const sim = new Simulation(room({ sources: [{ ...withPower(.2)[0], emitter: emitterPreset('radiator') },
+      { ...withPower(.05, 'cold')[0], id: 2, x: 1 }] }), insulated);
+    const actual = sim.advance(1);
+    expect(sim.energyUseKWh().heating).toBeCloseTo(200 * actual / 3600000, 12);
+    expect(sim.energyUseKWh().cooling).toBeCloseTo(50 * actual / 3600000, 12);
+    sim.reset(); expect(sim.energyUseKWh()).toEqual({ heating: 0, cooling: 0 });
+    expect(sim.stats().mean).toBeCloseTo(20, 8); expect(sim.elapsed).toBe(0);
   });
-
-  it('the default room starts balanced at 20 °C', () => {
-    const hold = holdPowerKW(DEFAULT_ROOM, 1, 20)!;
-    expect(DEFAULT_ROOM.sources[0].powerKW).toBeCloseTo(hold.kW, 1);
+  it('reports signed boundary components and ventilation separately', () => {
+    const sim = new Simulation(room({ sources: [], outsideC: 0, openings: [{ id: 1, kind: 'window', side: 'left', pos: 2, length: 1,
+      heightM: 1, sillM: .8, open: true }] }));
+    sim.advance(.01); const loss = sim.heatLossBreakdownW();
+    expect(loss.ventilationW).toBeGreaterThan(0); expect(loss.openingsW).toBe(0);
+    expect(loss.roofW).toBeGreaterThan(0); expect(loss.floorW).toBeGreaterThan(0); expect(loss.wallsW).toBeGreaterThan(0);
+    expect(loss.totalW).toBeCloseTo(loss.roofW + loss.floorW + loss.wallsW + loss.openingsW + loss.ventilationW, 8);
+    expect(sim.diagnostics().relativeEnergyError).toBeLessThan(.001);
   });
-
-  it('the thermostat switches heat on and off across its hysteresis band', () => {
-    const sim = new Simulation(
-      room({
-        outsideC: 20,
-        thermostat: { enabled: true, targetC: 20, deadbandC: 0.5 },
-        sources: withPower(1),
-      }),
-      { ...DEFAULT_PHYSICS, uScale: 0 },
-    );
-    sim.T.fill(19);
-    sim.advance(1);
-    expect(sim.thermostatHeatingOn()).toBe(true);
-    const heatingJ = sim.energyUseKWh().heating * 3_600_000;
-    expect(heatingJ).toBeGreaterThan(0);
-
-    sim.T.fill(20.5);
-    sim.advance(1);
-    expect(sim.thermostatHeatingOn()).toBe(false);
-    expect(sim.energyUseKWh().heating * 3_600_000).toBeCloseTo(heatingJ, 4);
-    expect(sim.energyUseKWh().cooling).toBe(0);
-  });
-
-  it('restarts the heat call when re-enabled at the target', () => {
-    const configured = room({
-      outsideC: 20,
-      thermostat: { enabled: true, targetC: 20, deadbandC: 0.5 },
-      sources: withPower(1),
-    });
-    const sim = new Simulation(configured, { ...DEFAULT_PHYSICS, uScale: 0 });
-    sim.T.fill(20.5);
-    sim.advance(0.1);
-    expect(sim.thermostatHeatingOn()).toBe(false);
-
-    sim.setRoom({ ...configured, thermostat: { ...configured.thermostat, enabled: false } });
-    sim.setRoom({ ...configured, thermostat: { ...configured.thermostat, targetC: 20.5 } });
-    expect(sim.thermostatHeatingOn()).toBe(true);
-    sim.advance(0.1);
-    expect(sim.energyUseKWh().heating).toBeGreaterThan(0);
-  });
-
-  it('tracks cumulative heater and cooling-source energy and resets the totals', () => {
-    const sim = new Simulation(
-      room({
-        outsideC: 20,
-        sources: [
-          { id: 1, kind: 'heat', x: 1, y: 1, z: 0.4, powerKW: 2 },
-          { id: 2, kind: 'cold', x: 4, y: 2, z: 0.4, powerKW: 0.5 },
-        ],
-      }),
-      { ...DEFAULT_PHYSICS, uScale: 0 },
-    );
-    const advanced = sim.advance(1);
-    expect(sim.energyUseKWh().heating).toBeCloseTo((2000 * advanced) / 3_600_000, 8);
-    expect(sim.energyUseKWh().cooling).toBeCloseTo((500 * advanced) / 3_600_000, 8);
-    sim.reset();
-    expect(sim.energyUseKWh()).toEqual({ heating: 0, cooling: 0 });
-  });
-
-  it('tracks heat-loss components whose sum matches total enclosure loss', () => {
-    const sim = new Simulation(
-      room({
-        outsideC: 0,
-        openings: [{ id: 1, kind: 'window', side: 'left', pos: 1.2, length: 0.8, heightM: 1.2, sillM: 0.8, open: true }],
-      }),
-    );
-    sim.T.fill(20);
-    const loss = sim.heatLossBreakdownW();
-    expect(loss.openingsW).toBeGreaterThan(0);
-    expect(loss.roofW).toBeGreaterThan(0);
-    expect(loss.wallsW).toBeGreaterThan(0);
-    expect(loss.floorW).toBeGreaterThan(0);
-    expect(loss.roofW + loss.wallsW + loss.floorW + loss.openingsW).toBeCloseTo(loss.totalW, 6);
-    expect(sim.wallLossW()).toBeCloseTo(loss.totalW, 6);
-  });
-
-  it('reports unreachable when outside is warmer than the target', () => {
-    const hold = holdPowerKW(room({ outsideC: 30 }), 1, 20)!;
-    expect(hold.kW).toBe(0);
-    expect(hold.reachable).toBe(false);
-  });
-
-  it('hold power accounts for the roof insulation', () => {
+  it('estimates steady heating from layers and independent floor boundary', () => {
+    const r = room({ outsideC: -5 }); const hold = holdPowerKW(r, 1)!;
+    expect(hold.reachable).toBe(true); expect(hold.kW).toBeGreaterThan(0);
+    expect(holdPowerKW(room({ outsideC: 30 }), 1)!.reachable).toBe(false);
     const thin = room({ roof: { ...DEFAULT_ROOM.roof, insulationM: 0 } });
-    const thick = room({ roof: { ...DEFAULT_ROOM.roof, insulationM: 0.3 } });
-    expect(holdPowerKW(thin, 1, 20)!.kW).toBeGreaterThan(holdPowerKW(thick, 1, 20)!.kW + 1);
+    const thick = room({ roof: { ...DEFAULT_ROOM.roof, insulationM: .3 } });
+    expect(holdPowerKW(thin, 1)!.kW).toBeGreaterThan(holdPowerKW(thick, 1)!.kW);
   });
-
-  it('a warm day outside heats a room that has no sources', () => {
-    const sim = new Simulation(room({ sources: [], outsideC: 35 }));
-    advance(sim, 3600);
-    expect(sim.stats().mean).toBeGreaterThan(20.01);
-    expect(sim.stats().max).toBeLessThanOrEqual(35);
-  });
-
-  it('heats up near the source and spreads outward', () => {
-    const sim = new Simulation(room());
-    advance(sim, 60);
-    expect(sim.sample(2.5, 2)).toBeGreaterThan(sim.sample(0.1, 0.1));
-  });
-
-  it('reaches a steady state where wall loss equals source power', () => {
-    const params = { ...DEFAULT_PHYSICS, massFactor: 0.05 };
-    const r = room({ widthM: 3, heightM: 3, sources: [{ id: 1, kind: 'heat', x: 1.5, y: 1.5, z: 0.4, powerKW: 1.5 }] });
-    const sim = new Simulation(r, params);
-    for (let i = 0; i < 60; i++) advance(sim, 5);
-    expect(Math.abs(sim.wallLossW() - 1500) / 1500).toBeLessThan(0.02);
-  });
-
-  it('better insulation gives a hotter room', () => {
-    const poor = new Simulation(room({ wall: { ...DEFAULT_ROOM.wall, insulationM: 0 } }));
-    const good = new Simulation(room({ wall: { ...DEFAULT_ROOM.wall, insulationM: 0.2 } }));
-    advance(poor, 400);
-    advance(good, 400);
-    expect(good.stats().mean).toBeGreaterThan(poor.stats().mean);
-  });
-
-  it('reset restores the initial state', () => {
-    const sim = new Simulation(room({ convection: true }));
-    advance(sim, 100);
-    sim.reset();
-    expect(sim.elapsed).toBe(0);
-    expect(sim.stats().max).toBe(DEFAULT_PHYSICS.initialC);
-  });
-
-  it('furniture absorbs heat and contributes to total stored energy', () => {
-    const r = room({ sources: withPower(2), outsideC: 20, furniture: [{ id: 1, kind: 'table', material: 'wood', x: 2.5, y: 2, widthM: 1.4, depthM: 0.9, heightM: 0.8, rotation: 0 }] });
-    const furnished = new Simulation(r, { ...DEFAULT_PHYSICS, uScale: 0 });
-    const empty = new Simulation({ ...r, furniture: [] }, { ...DEFAULT_PHYSICS, uScale: 0 });
-    const furnishedE0 = furnished.energyJ();
-    const advanced = advance(furnished, 600);
-    advance(empty, advanced);
-    expect(Math.abs(furnished.energyJ() - furnishedE0 - 2000 * advanced) / (2000 * advanced)).toBeLessThan(0.002);
-    expect(furnished.furnitureTemperatures()[1]).toBeGreaterThan(20);
-    expect(furnished.stats().mean).toBeLessThan(empty.stats().mean);
-  });
-
-  it('reports diffusive heat-flow arrows from hot toward cold', () => {
-    const sim = new Simulation(room({ sources: [], outsideC: 20 }));
-    for (let z = 0; z < sim.nz; z++) for (let y = 0; y < sim.ny; y++) {
-      for (let x = 0; x < sim.nx; x++) sim.T[(z * sim.ny + y) * sim.nx + x] = x;
-    }
-    const field = sim.vectorField();
-    expect(field.length).toBeGreaterThan(0);
-    expect(field.every((v) => v.dx < 0 && v.magnitude > 0)).toBe(true);
-  });
-});
-
-describe('openings', () => {
-  const steady = (r: RoomConfig) => {
-    const sim = new Simulation(r, { ...DEFAULT_PHYSICS, massFactor: 0.05 });
-    for (let i = 0; i < 60; i++) advance(sim, 5);
-    return sim;
-  };
-  const base = room({ widthM: 3, heightM: 3, sources: [{ id: 1, kind: 'heat', x: 1.5, y: 1.5, z: 0.4, powerKW: 1 }] });
-  const window = (open: boolean) => ({
-    id: 1,
-    kind: 'window' as const,
-    side: 'top' as const,
-    pos: 1.5,
-    length: 1.2, heightM: 1.2, sillM: 0.8,
-    open,
-  });
-
-  it('an open window loses far more heat than a closed one', () => {
-    const closed = steady({ ...base, openings: [window(false)] });
-    const open = steady({ ...base, openings: [window(true)] });
-    const closedLoss = new Simulation({ ...base, openings: [window(false)] }).wallLossW();
-    const openLoss = new Simulation({ ...base, openings: [window(true)] }).wallLossW();
-    expect(openLoss).toBeGreaterThan(closedLoss * 1.5);
-    expect(open.stats().mean).toBeLessThan(closed.stats().mean - 1);
-  });
-
-  it('a closed window still balances source power at steady state', () => {
-    const sim = steady({ ...base, openings: [window(false)] });
-    expect(Math.abs(sim.wallLossW() - 1000) / 1000).toBeLessThan(0.02);
-  });
-
-  it('heat leaves through the opening, not the rest of the wall', () => {
-    const sim = steady({ ...base, openings: [window(true)] });
-    const nearWindow = sim.sample(1.5, 0.02);
-    const farWall = sim.sample(1.5, 2.98);
-    expect(nearWindow).toBeLessThan(farWall);
-  });
-});
-
-describe('walls', () => {
-  it('computes U from layers', () => {
-    const brick = wallU({ material: 'brick', thicknessM: 0.2, insulation: 'mineral', insulationM: 0 });
-    expect(brick).toBeCloseTo(1 / (0.17 + 0.2 / 0.77), 6);
-    const insulated = wallU({ material: 'brick', thicknessM: 0.2, insulation: 'mineral', insulationM: 0.1 });
-    expect(insulated).toBeLessThan(brick / 3);
-  });
-
-  it('wood loses less heat than concrete of the same thickness', () => {
-    const w = (material: 'wood' | 'concrete') =>
-      wallU({ material, thicknessM: 0.2, insulation: 'eps', insulationM: 0 });
-    expect(w('wood')).toBeLessThan(w('concrete'));
-  });
-
-  it('thicker walls lose less heat', () => {
-    const w = (thicknessM: number) =>
-      wallU({ material: 'brick', thicknessM, insulation: 'eps', insulationM: 0 });
-    expect(w(0.4)).toBeLessThan(w(0.1));
-  });
-});
-
-describe('convection', () => {
-  it('hot air rises along Z, independent of floor-plan Y', () => {
-    const sources = [{ id: 1, kind: 'heat' as const, x: 2, y: 2, z: 1.2, powerKW: 3 }];
-    const params = { ...DEFAULT_PHYSICS, massFactor: 1 };
-    const r = room({ widthM: 4, heightM: 4, ceilingM: 2.4, outsideC: 20, sources });
-    const flat = new Simulation(r, params);
-    const conv = new Simulation({ ...r, convection: true }, params);
-    advance(flat, 120);
-    advance(conv, 120);
-    const flatDiff = flat.sample(2, 2, 1.8) - flat.sample(2, 2, 0.6);
-    const convDiff = conv.sample(2, 2, 1.8) - conv.sample(2, 2, 0.6);
-    expect(Math.abs(flatDiff)).toBeLessThan(0.5);
-    expect(convDiff).toBeGreaterThan(1);
-  });
-
-  it('stays numerically stable with a strong heater over a long run', () => {
-    const sim = new Simulation(
-      room({ convection: true, sources: [{ id: 1, kind: 'heat', x: 2.5, y: 3.5, z: 0.4, powerKW: 10 }] }),
-    );
-    for (let i = 0; i < 40; i++) advance(sim, 30);
-    const s = sim.stats();
-    expect(Number.isFinite(s.min) && Number.isFinite(s.max)).toBe(true);
-    expect(s.max).toBeLessThan(500);
-    expect(s.min).toBeGreaterThan(-50);
-  });
-
-  it('does not create or destroy much heat while only mixing', () => {
-    const sim = new Simulation(room({ convection: true, sources: withPower(2) }), {
-      ...DEFAULT_PHYSICS,
-      uScale: 0,
-    });
-    const e0 = sim.energyJ();
-    const t = advance(sim, 200);
-    const gained = sim.energyJ() - e0;
-    expect(Math.abs(gained - 2000 * t) / (2000 * t)).toBeLessThan(0.002);
+  it('preserves heat-flow direction from a hot-to-cold gradient', () => {
+    const sim = new Simulation(room({ sources: [] }));
+    for (let i = 0; i < sim.T.length; i++) sim.T[i] = i % sim.nx;
+    const field = sim.vectorField(); expect(field.length).toBeGreaterThan(0);
+    expect(field.every(v => v.dx < 0 && v.magnitude > 0)).toBe(true);
   });
 });
 

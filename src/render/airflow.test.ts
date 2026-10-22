@@ -1,12 +1,14 @@
 import { expect, it } from 'vitest';
+import { DEFAULT_MODEL } from '../sim/model';
 import { DEFAULT_ROOM } from '../sim/config';
 import { Simulation } from '../sim/simulation';
 import { AirflowTrails, airflowHighlight, traceAirflow } from './airflow';
+const model = { ...structuredClone(DEFAULT_MODEL), quality: 'coarse' as const, radiation: false, leakageACH: 0, floor: { ...structuredClone(DEFAULT_MODEL.floor), boundary: 'adjacent' as const, temperatureC: 20 }, environment: { ...DEFAULT_MODEL.environment, skyOffsetC: 0 } };
 
 it('shows no airflow in still air', () => {
-  const sim = new Simulation({ ...DEFAULT_ROOM, convection: true, sources: [], outsideC: 20 });
+  const sim = new Simulation({ ...DEFAULT_ROOM, convection: true, sources: [], outsideC: 20, model });
   sim.advance(10);
-  expect(sim.sampleVelocity(2.5, 2, 1.25)).toEqual([0, 0, 0]);
+  expect(Math.hypot(...sim.sampleVelocity(2.5,2,1.25))).toBeLessThan(1e-10);
   expect(traceAirflow(sim, [5, 4, 2.5], [2.5, 2, 1.25])).toHaveLength(1);
 });
 
@@ -23,8 +25,8 @@ it('follows flow through the middle and stops at a room boundary', () => {
 });
 
 it('follows simulated buoyancy above a heater and resets with the simulation', () => {
-  const sim = new Simulation({ ...DEFAULT_ROOM, convection: true, outsideC: 20 });
-  for (let i = 0; i < 25; i++) sim.advance(1);
+  const sim = new Simulation({ ...DEFAULT_ROOM, convection: true, outsideC: 20, model, sources: [{ ...DEFAULT_ROOM.sources[0], emitter: undefined, powerKW: .2 }] });
+  for (let i=0;i<10;i++) { if(!sim.advance(1)) throw new Error(sim.diagnostics().failure ?? 'No time advanced'); }
   const seed: [number, number, number] = [2.5, 2, 0.9];
   expect(sim.sampleVelocity(...seed)[2]).toBeGreaterThan(0);
   const points = traceAirflow(sim, [5, 4, 2.5], seed);

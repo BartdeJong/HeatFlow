@@ -1,471 +1,500 @@
-import { DEFAULT_PHYSICS, FURNITURE_MATERIALS, wallRegions, wallU, roofU, type PhysicsParams, type RoomConfig } from './config';
-import { furnitureBoxes } from './furniture';
-
-export interface HeatLossBreakdown { roofW: number; wallsW: number; floorW: number; openingsW: number; totalW: number; }
-export interface HeatFlowVector { x: number; y: number; z: number; dx: number; dy: number; dz: number; magnitude: number; }
-
-const TARGET_CELLS = 30;
-const CONVECTION_CELLS = 20;
-const MAX_SUBSTEPS_PER_CALL = 160;
-const FLOW_SECONDS = 1;
-const PRESSURE_ITERATIONS = 24;
-
-/** Trilinear sampling of a cell-centred 3D grid. */
-export function trilerp(f: Float32Array, nx: number, ny: number, nz: number, x: number, y: number, z: number): number {
-  x = Math.max(0, Math.min(nx - 1, x));
-  y = Math.max(0, Math.min(ny - 1, y));
-  z = Math.max(0, Math.min(nz - 1, z));
-  const i = Math.min(nx - 2, Math.floor(x));
-  const j = Math.min(ny - 2, Math.floor(y));
-  const k = Math.min(nz - 2, Math.floor(z));
-  const sx = x - i, sy = y - j, sz = z - k;
-  const a = (k * ny + j) * nx + i;
-  const b = a + nx * ny;
-  const lo = (f[a] * (1 - sx) + f[a + 1] * sx) * (1 - sy) + (f[a + nx] * (1 - sx) + f[a + nx + 1] * sx) * sy;
-  const hi = (f[b] * (1 - sx) + f[b + 1] * sx) * (1 - sy) + (f[b + nx] * (1 - sx) + f[b + nx + 1] * sx) * sy;
-  return lo * (1 - sz) + hi * sz;
+import { DEFAULT_PHYSICS, FURNITURE_MATERIALS, type PhysicsParams, type RoomConfig } from './config';
+import { getModel, getEmitter } from './model';
+import { GridGeometry } from './grid';
+import { FlowSolver, type BoundaryFlow } from './flow';
+import { solveVentilation } from './ventilation';
+import { buildSurfaces, type Surface, type SurfaceKind } from './surfaces';
+import { RadiationEnclosure, type RadiationPatch } from './radiation';
+import { getEnvironment, traceSolar, exteriorConvection, exteriorLongwaveW } from './environment';
+import { furnitureBoxes, furnitureOverlaps, type Point3 } from './furniture';
+import { fieldVectors, trilerp, weightedTrilerp, type SimulationField } from './field';
+export { trilerp } from './field';
+export type { HeatFlowVector } from './field';
+export interface HeatLossBreakdown { roofW: number; wallsW: number; floorW: number; openingsW: number; ventilationW: number; totalW: number }
+export interface SimulationDiagnostics {
+  storedEnergyJ: number; energyBalanceJ: number; relativeEnergyError: number;
+  surfaceTemperatures: { id: string; label: string; temperatureC: number }[];
+  sensorC: number; ventilationACH: number; pressureResidual: number; maxDivergence: number; iterations: number;
+  failure: string | null; solarW: number; outsideC: number; netExternalJ: number;
 }
+interface Lump { temperature: number; capacity: number }
+interface Contact { cells: Int32Array; weights: Float64Array }
+interface Face { a: number; b: number; axis: 0 | 1 | 2; index: number; area: number; spacing: number }
+const emptyLoss = (): HeatLossBreakdown => ({ roofW: 0, wallsW: 0, floorW: 0, openingsW: 0, ventilationW: 0, totalW: 0 });
+const minmod = (a: number, b: number) => a * b <= 0 ? 0 : Math.sign(a) * Math.min(Math.abs(a), Math.abs(b));
 
-/**
- * Volumetric finite-volume heat solver. x = width, y = length, z = height above floor.
- * All six faces exchange U·A·ΔT with outside. Optional 3D buoyancy uses a staggered
- * velocity grid, solid-wall pressure projection and conservative upwind heat transport.
+/** Coupled finite-volume air, layered solids, radiation and pressure-driven ventilation.
+ * Every exchange has a corresponding opposite transfer or an entry in the external ledger.
+ * Solver energy is always measured relative to 0°C, independent of outdoor weather.
  */
-export class Simulation {
-  readonly nx: number;
-  readonly ny: number;
-  readonly nz: number;
-  readonly dx: number;
-  readonly dy: number;
-  readonly dz: number;
-  readonly dt: number;
-  readonly params: PhysicsParams;
-  readonly convection: boolean;
-  T: Float32Array;
-  /** Occupied voxels are thermal solids, excluded from airflow and air-temperature statistics. */
-  readonly solid: Uint8Array;
+export class Simulation implements SimulationField {
+  readonly nx: number; readonly ny: number; readonly nz: number;
+  readonly dx: number; readonly dy: number; readonly dz: number;
+  readonly params: PhysicsParams; readonly convection: boolean;
+  readonly grid: GridGeometry; readonly flow: FlowSolver;
+  readonly solid: Uint8Array; readonly T: Float64Array;
+  readonly dt = 1;
   elapsed = 0;
-
-  private next: Float32Array;
   private room: RoomConfig;
-  private sources: { cells: Int32Array; watts: number }[] = [];
-  /** Sum of U·area over the exposed faces of each voxel, W/K. */
-  private lossUA: Float64Array;
-  private readonly cellCap: number;
-  private capacities: Float64Array;
-  private owner: Int32Array;
-  private gx: Float32Array;
-  private gy: Float32Array;
-  private gz: Float32Array;
-  private hasFurniture = false;
-  private u: Float32Array;
-  private v: Float32Array;
-  private w: Float32Array;
-  private openU: Uint8Array;
-  private openV: Uint8Array;
-  private openW: Uint8Array;
-  private flowTime = 0;
+  private boxes: ReturnType<typeof furnitureBoxes>[] = [];
+  private capacity: Float64Array;
+  private groupCapacity: Float64Array;
+  private groups: number[] = [];
+  private members: Map<number, number[]> = new Map();
+  private faces: Face[] = [];
+  private surfaces: Surface[] = [];
+  private contacts: Contact[] = [];
+  private furniture: Lump[] = [];
+  private emitters: Lump[] = [];
+  private sources: { cells: Int32Array; weights: Float64Array }[] = [];
+  private radiation?: RadiationEnclosure;
+  private radiationGroups: number[][] = [];
+  private surfaceKey = '';
   private thermostatHeating = true;
-  private heatingEnergyJ = 0;
-  private coolingEnergyJ = 0;
-  private componentUA!: Record<'roofW' | 'floorW' | 'wallsW' | 'openingsW', Float64Array>;
+  private sensorC: number;
+  private heatingJ = 0; private coolingJ = 0;
+  private externalJ = 0; private exchangedJ = 0; private initialEnergyJ = 0;
+  private loss = emptyLoss();
+  private failed: string | null = null;
+  private recommendedDt = Infinity;
+  private advecting = false;
+  private lastFlow = { residual: 0, maxDivergence: 0, iterations: 0 };
+  private ventilationACH = 0; private solarW = 0;
+  private lastEnvironment: ReturnType<typeof getEnvironment>;
 
   constructor(room: RoomConfig, params: PhysicsParams = DEFAULT_PHYSICS) {
-    this.room = room;
-    this.params = params;
-    this.convection = room.convection;
-    const target = this.convection ? CONVECTION_CELLS : TARGET_CELLS;
-    const cell = Math.max(room.widthM, room.heightM, room.ceilingM) / target;
-    this.nx = Math.max(2, Math.round(room.widthM / cell));
-    this.ny = Math.max(2, Math.round(room.heightM / cell));
-    this.nz = Math.max(2, Math.round(room.ceilingM / cell));
-    this.dx = room.widthM / this.nx;
-    this.dy = room.heightM / this.ny;
-    this.dz = room.ceilingM / this.nz;
-    const { dx, dy, dz } = this;
-    const capacity = params.airDensity * params.airCp * params.massFactor;
-    this.cellCap = capacity * dx * dy * dz;
-    const alpha = this.convection ? params.convectionAlpha : params.alpha;
-    const n = this.nx * this.ny * this.nz;
-    this.T = new Float32Array(n).fill(params.initialC);
-    this.next = new Float32Array(n);
-    this.lossUA = new Float64Array(n);
-    this.solid = new Uint8Array(n);
-    this.owner = new Int32Array(n).fill(-1);
-    this.capacities = new Float64Array(n).fill(this.cellCap);
-    this.gx = new Float32Array(n);
-    this.gy = new Float32Array(n);
-    this.gz = new Float32Array(n);
-    this.u = new Float32Array((this.nx + 1) * this.ny * this.nz);
-    this.v = new Float32Array(this.nx * (this.ny + 1) * this.nz);
-    this.w = new Float32Array(this.nx * this.ny * (this.nz + 1));
-    this.openU = new Uint8Array(this.u.length);
-    this.openV = new Uint8Array(this.v.length);
-    this.openW = new Uint8Array(this.w.length);
-    const { maxRate, minCapacity } = this.buildFurniture();
-    // Include thermal interfaces and worst-case outside loss for live opening/wall changes.
-    const diffusionRate = Math.max(maxRate, 2 * alpha * (1 / dx ** 2 + 1 / dy ** 2 + 1 / dz ** 2));
-    const boundaryRate = 60 * params.uScale * (dy * dz + dx * dz + dx * dy) / minCapacity;
-    this.dt = Math.min(1, 0.9 / (diffusionRate + boundaryRate));
-    this.setRoom(room);
+    if (furnitureOverlaps(room.furniture).length) throw new Error('Furniture overlaps: move or remove the highlighted pieces before starting.');
+    this.room = room; this.boxes = room.furniture.map(furnitureBoxes); this.params = params; this.convection = room.convection;
+    const cells = { coarse: 24, balanced: 32, fine: 48 }[getModel(room).quality];
+    const spacing = Math.max(room.widthM, room.heightM, room.ceilingM) / cells;
+    this.nx = Math.max(2, Math.round(room.widthM / spacing)); this.ny = Math.max(2, Math.round(room.heightM / spacing)); this.nz = Math.max(2, Math.round(room.ceilingM / spacing));
+    this.grid = new GridGeometry(room, this.nx, this.ny, this.nz); this.flow = new FlowSolver(this.grid);
+    this.dx = this.grid.dx; this.dy = this.grid.dy; this.dz = this.grid.dz; this.solid = this.grid.solid;
+    this.T = new Float64Array(this.grid.volume.length).fill(params.initialC);
+    this.capacity = Float64Array.from(this.grid.volume, v => v * params.airDensity * params.airCp);
+    this.groupCapacity = new Float64Array(this.T.length);
+    for (let i = 0; i < this.T.length; i++) if (this.capacity[i] > 0) {
+      const r = this.grid.representative[i]; this.groupCapacity[r] += this.capacity[i];
+      const members = this.members.get(r) ?? []; members.push(i); this.members.set(r, members);
+    }
+    this.groups = [...this.members.keys()];
+    if (!this.groups.length) throw new Error('The room must contain some free air.');
+    for (let z = 0; z < this.nz; z++) for (let y = 0; y < this.ny; y++) for (let x = 0; x < this.nx; x++) {
+      const a = this.index(x, y, z);
+      if (x + 1 < this.nx) this.addFace(a, a + 1, 0, this.grid.uIndex(x + 1, y, z), this.grid.openU, this.dx);
+      if (y + 1 < this.ny) this.addFace(a, a + this.nx, 1, this.grid.vIndex(x, y + 1, z), this.grid.openV, this.dy);
+      if (z + 1 < this.nz) this.addFace(a, a + this.nx * this.ny, 2, this.grid.wIndex(x, y, z + 1), this.grid.openW, this.dz);
+    }
+    this.furniture = room.furniture.map((f, j) => ({ temperature: params.initialC,
+      capacity: this.grid.furnitureVolumes[j].reduce((s, v) => s + v, 0) * FURNITURE_MATERIALS.find(m => m.id === f.material)!.capacity }));
+    this.emitters = room.sources.map(s => ({ temperature: params.initialC, capacity: getEmitter(s).capacityJPerK }));
+    this.sensorC = params.initialC; this.lastEnvironment = getEnvironment(room, 0);
+    this.setRoom(room); this.initialEnergyJ = this.energyJ();
   }
-
-  private buildFurniture(): { maxRate: number; minCapacity: number } {
-    const { nx, ny, nz, dx, dy, dz, solid, owner, capacities, gx, gy, gz } = this;
-    const volume = dx * dy * dz;
-    const materials = this.room.furniture.map((f) => FURNITURE_MATERIALS.find((m) => m.id === f.material)!);
-    for (let f = 0; f < this.room.furniture.length; f++) {
-      for (const box of furnitureBoxes(this.room.furniture[f])) {
-        const from = box.min.map((value, axis) => Math.max(0, Math.floor((value + 1e-8) / [dx, dy, dz][axis])));
-        const to = box.max.map((value, axis) => Math.min([nx, ny, nz][axis], Math.ceil((value - 1e-8) / [dx, dy, dz][axis])));
-        for (let z = from[2]; z < to[2]; z++) for (let y = from[1]; y < to[1]; y++) for (let x = from[0]; x < to[0]; x++) {
-          const i = (z * ny + y) * nx + x;
-          solid[i] = 1; owner[i] = f;
-          capacities[i] = materials[f].capacity * volume;
-          this.hasFurniture = true;
-        }
-      }
-    }
-    const alpha = this.convection ? this.params.convectionAlpha : this.params.alpha;
-    const conductance = (a: number, b: number, area: number, spacing: number) => {
-      if (!solid[a] && !solid[b]) return alpha * this.cellCap / spacing ** 2;
-      if (solid[a] && solid[b]) return area / (spacing / 2 / materials[owner[a]].k + spacing / 2 / materials[owner[b]].k);
-      const material = materials[owner[solid[a] ? a : b]];
-      return area / (1 / material.h + spacing / 2 / material.k);
-    };
-    const plane = nx * ny;
-    for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      const i = (z * ny + y) * nx + x;
-      if (x < nx - 1) {
-        gx[i] = conductance(i, i + 1, dy * dz, dx);
-        this.openU[(z * ny + y) * (nx + 1) + x + 1] = Number(!solid[i] && !solid[i + 1]);
-      }
-      if (y < ny - 1) {
-        gy[i] = conductance(i, i + nx, dx * dz, dy);
-        this.openV[(z * (ny + 1) + y + 1) * nx + x] = Number(!solid[i] && !solid[i + nx]);
-      }
-      if (z < nz - 1) {
-        gz[i] = conductance(i, i + plane, dx * dy, dz);
-        this.openW[i + plane] = Number(!solid[i] && !solid[i + plane]);
-      }
-    }
-    let maxRate = 0, minCapacity = this.cellCap;
-    for (let i = 0; i < solid.length; i++) {
-      const x = i % nx, y = Math.floor(i / nx) % ny, z = Math.floor(i / plane);
-      const g = gx[i] + gy[i] + gz[i] + (x > 0 ? gx[i - 1] : 0) + (y > 0 ? gy[i - nx] : 0) + (z > 0 ? gz[i - plane] : 0);
-      maxRate = Math.max(maxRate, g / capacities[i]);
-      minCapacity = Math.min(minCapacity, capacities[i]);
-    }
-    return { maxRate, minCapacity };
+  private index(x: number, y: number, z: number) { return (z * this.ny + y) * this.nx + x; }
+  private addFace(a: number, b: number, axis: 0 | 1 | 2, index: number, areas: Float64Array, spacing: number) {
+    if (this.capacity[a] && this.capacity[b] && areas[index] > 0 && this.grid.representative[a] !== this.grid.representative[b]) this.faces.push({ a, b, axis, index, area: areas[index], spacing });
   }
-
-  /** Size, convection mode and furniture are fixed at construction. Other settings update live. */
+  private cellAt(p: readonly number[]): number {
+    return this.index(...p.map((v, a) => Math.max(0, Math.min([this.nx, this.ny, this.nz][a] - 1, Math.floor(v / [this.dx, this.dy, this.dz][a])))) as [number, number, number]);
+  }
+  private nearestAir(p: readonly number[]): number {
+    const i = this.cellAt(p); if (this.capacity[i]) return i;
+    let best = this.groups[0], distance = Infinity;
+    for (const r of this.groups) {
+      const c = this.center(r), d = c.reduce((s, n, a) => s + (n - p[a]) ** 2, 0);
+      if (d < distance) { best = r; distance = d; }
+    }
+    return best;
+  }
+  private center(i: number): Point3 { return [(i % this.nx + .5) * this.dx, (Math.floor(i / this.nx) % this.ny + .5) * this.dy, (Math.floor(i / (this.nx * this.ny)) + .5) * this.dz]; }
+  private contact(surface: Surface): Contact {
+    const normal = surface.normal, axis = normal.findIndex(n => n !== 0), other = [0, 1, 2].filter(a => a !== axis), spacing = [this.dx, this.dy, this.dz];
+    const a = other[0], b = other[1], weights = new Map<number, number>();
+    for (let j = Math.floor(surface.min[b] / spacing[b]); j < Math.ceil(surface.max[b] / spacing[b] - 1e-9); j++)
+      for (let i = Math.floor(surface.min[a] / spacing[a]); i < Math.ceil(surface.max[a] / spacing[a] - 1e-9); i++) {
+        const loA = Math.max(surface.min[a], i * spacing[a]), hiA = Math.min(surface.max[a], (i + 1) * spacing[a]);
+        const loB = Math.max(surface.min[b], j * spacing[b]), hiB = Math.min(surface.max[b], (j + 1) * spacing[b]);
+        const area = (hiA - loA) * (hiB - loB); if (area <= 0) continue;
+        const p = [...surface.center]; p[a] = (loA + hiA) / 2; p[b] = (loB + hiB) / 2; p[axis] += normal[axis] * 1e-6;
+        const cell = this.grid.representative[this.nearestAir(p)]; weights.set(cell, (weights.get(cell) ?? 0) + area);
+      }
+    const total = [...weights.values()].reduce((s, w) => s + w, 0);
+    return { cells: Int32Array.from(weights.keys()), weights: Float64Array.from(weights.values(), w => w / total) };
+  }
   setRoom(room: RoomConfig): void {
-    const controlChanged =
-      room.thermostat.enabled !== this.room.thermostat.enabled ||
-      room.thermostat.targetC !== this.room.thermostat.targetC ||
-      room.thermostat.deadbandC !== this.room.thermostat.deadbandC;
-    if (!room.thermostat.enabled) {
-      this.thermostatHeating = true;
-    } else if (controlChanged) {
-      const mean = this.stats().mean;
-      this.thermostatHeating = mean <= room.thermostat.targetC;
-    }
+    const energyBeforeChange = this.surfaces.length ? this.energyJ() : null;
+    const oldSources = new Map(this.room.sources.map((s, i) => [s.id, this.emitters[i]]));
+    this.emitters = room.sources.map(s => ({ temperature: oldSources.get(s.id)?.temperature ?? this.params.initialC, capacity: getEmitter(s).capacityJPerK }));
     this.room = room;
-    const radius = Math.max(0.25, 1.2 * Math.max(this.dx, this.dy, this.dz));
-    this.sources = room.sources.map((s) => {
-      const cells: number[] = [];
-      if (s.kind === 'heat' && room.heatingMode === 'underfloor') {
-        for (let y = 0; y < this.ny; y++) for (let x = 0; x < this.nx; x++) cells.push(y * this.nx + x);
-        return { cells: Int32Array.from(cells), watts: s.powerKW * 1000 };
-      }
-      let nearest = 0, distance = Infinity;
-      for (let z = 0; z < this.nz; z++) for (let y = 0; y < this.ny; y++) for (let x = 0; x < this.nx; x++) {
-        const d = ((x + 0.5) * this.dx - s.x) ** 2 + ((y + 0.5) * this.dy - s.y) ** 2 + ((z + 0.5) * this.dz - s.z) ** 2;
-        const i = (z * this.ny + y) * this.nx + x;
-        if (d <= radius ** 2) cells.push(i);
-        if (d < distance) { distance = d; nearest = i; }
-      }
-      if (!cells.length) cells.push(nearest);
-      return { cells: Int32Array.from(cells), watts: (s.kind === 'cold' ? -1 : 1) * s.powerKW * 1000 };
+    this.sources = room.sources.map(s => {
+      const radius = .25, entries: number[] = [];
+      for (let i = 0; i < this.T.length; i++) if (this.capacity[i] && this.center(i).reduce((sum, n, a) => sum + (n - [s.x, s.y, s.z][a]) ** 2, 0) <= radius ** 2) entries.push(i);
+      if (!entries.length) entries.push(this.nearestAir([s.x, s.y, s.z]));
+      const total = entries.reduce((sum, i) => sum + this.capacity[i], 0);
+      return { cells: Int32Array.from(entries), weights: Float64Array.from(entries, i => this.capacity[i] / total) };
     });
-    this.updateLoss();
-  }
-
-  private updateLoss(): void {
-    const { nx, ny, nz, dx, dy, dz, lossUA } = this;
-    const scale = this.params.uScale;
-    lossUA.fill(0);
-    this.componentUA = { roofW: new Float64Array(lossUA.length), floorW: new Float64Array(lossUA.length),
-      wallsW: new Float64Array(lossUA.length), openingsW: new Float64Array(lossUA.length) };
-    const floorUA = wallU(this.room.wall) * dx * dy * scale;
-    for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      this.componentUA.floorW[y * nx + x] += floorUA;
-      this.componentUA.roofW[((nz - 1) * ny + y) * nx + x] += roofU(this.room.roof) * dx * dy * scale;
+    const key = JSON.stringify([room.openings, room.wall, room.roof, room.model?.floor, room.model?.wallLayers, room.model?.roofLayers, room.sources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
+    if (key !== this.surfaceKey) {
+      const previous = new Map(this.surfaces.map(s => [s.id, s]));
+      this.surfaces = buildSurfaces(room, this.params.initialC);
+      for (const s of this.surfaces) { const old = previous.get(s.id); if (old?.column && s.column && old.column.temperatures.length === s.column.temperatures.length) s.column.temperatures.set(old.column.temperatures); }
+      this.contacts = this.surfaces.map(s => this.contact(s));
+      this.buildRadiation(); this.surfaceKey = key;
+      // Changes to model geometry/construction are a controlled external intervention.
     }
-    for (const side of ['top', 'bottom', 'left', 'right'] as const) {
-      const horizontal = side === 'top' || side === 'bottom';
-      const count = horizontal ? nx : ny;
-      const ds = horizontal ? dx : dy;
-      const regions = wallRegions(this.room, side);
-      for (let z = 0; z < nz; z++) for (let a = 0; a < count; a++) {
-        let wallUA = 0, openingUA = 0;
-        for (const p of regions) {
-          const along = Math.max(0, Math.min((a + 1) * ds, p.to) - Math.max(a * ds, p.from));
-          const height = Math.max(0, Math.min((z + 1) * dz, p.top) - Math.max(z * dz, p.bottom));
-          if (p.opening) openingUA += p.u * along * height;
-          else wallUA += p.u * along * height;
-        }
-        const x = horizontal ? a : side === 'left' ? 0 : nx - 1;
-        const y = horizontal ? side === 'top' ? 0 : ny - 1 : a;
-        const i = (z * ny + y) * nx + x;
-        this.componentUA.wallsW[i] += wallUA * scale;
-        this.componentUA.openingsW[i] += openingUA * scale;
-      }
+    if (energyBeforeChange !== null) this.externalJ += this.energyJ() - energyBeforeChange;
+    if (!room.thermostat.enabled) this.thermostatHeating = true;
+  }
+  private buildRadiation() {
+    this.radiationGroups = [];
+    const grouped = new Map<string, number[]>();
+    this.surfaces.forEach((s, i) => {
+      // Consolidate small furniture faces by normal, limiting the cached dense enclosure solve.
+      const key = s.kind === 'furniture' ? `f${s.item}:${s.normal.join()}` : s.id;
+      const group = grouped.get(key) ?? []; group.push(i); grouped.set(key, group);
+    });
+    this.radiationGroups = [...grouped.values()];
+    const patches: RadiationPatch[] = this.radiationGroups.map(group => {
+      const s = this.surfaces[group[0]], area = group.reduce((sum, i) => sum + this.surfaces[i].area, 0);
+      if (group.length === 1) return s;
+      const center = [0, 1, 2].map(a => group.reduce((sum, i) => sum + this.surfaces[i].center[a] * this.surfaces[i].area, 0) / area) as Point3;
+      const axis = s.normal.findIndex(n => n !== 0); center[axis] = s.normal[axis] > 0 ? Math.max(...group.map(i => this.surfaces[i].center[axis])) : Math.min(...group.map(i => this.surfaces[i].center[axis]));
+      return { area, center, normal: s.normal, emissivity: s.emissivity };
+    });
+    this.radiation = patches.length > 1 ? new RadiationEnclosure(patches, this.room.furniture.flatMap(furnitureBoxes)) : undefined;
+  }
+  private contactState(contact: Contact) {
+    let capacity = 0, energy = 0;
+    for (let j = 0; j < contact.cells.length; j++) { const i = contact.cells[j], c = this.groupCapacity[i]; capacity += c; energy += c * this.T[i]; }
+    return { capacity, temperature: capacity ? energy / capacity : this.params.initialC };
+  }
+  private contactHeat(contact: Contact, joules: number) {
+    // The implicit air lump contains the full adjacent air volume. Splitting energy
+    // by capacity gives each participating cell the exact solved temperature change.
+    const state = this.contactState(contact); if (!state.capacity) return;
+    for (let j = 0; j < contact.cells.length; j++) {
+      const i = contact.cells[j], delta = joules / state.capacity;
+      for (const cell of this.members.get(i)!) this.T[cell] += delta;
     }
-    for (let i = 0; i < lossUA.length; i++) lossUA[i] = this.componentUA.roofW[i] + this.componentUA.floorW[i] + this.componentUA.wallsW[i] + this.componentUA.openingsW[i];
   }
-
-  heatLossBreakdownW(): HeatLossBreakdown {
-    const result = { roofW: 0, floorW: 0, wallsW: 0, openingsW: 0, totalW: 0 };
-    for (const key of ['roofW', 'floorW', 'wallsW', 'openingsW'] as const) {
-      for (let i = 0; i < this.T.length; i++) result[key] += this.componentUA[key][i] * (this.T[i] - this.room.outsideC);
-      result.totalW += result[key];
+  private addAirHeat(i: number, joules: number) {
+    const r = this.grid.representative[i], c = this.groupCapacity[r]; if (!c) return;
+    for (const member of this.members.get(r)!) this.T[member] += joules / c;
+  }
+  private syncGroups() {
+    for (const r of this.groups) {
+      let energy = 0; for (const i of this.members.get(r)!) energy += this.T[i] * this.capacity[i];
+      const t = energy / this.groupCapacity[r]; for (const i of this.members.get(r)!) this.T[i] = t;
     }
-    return result;
   }
-
-  energyUseKWh(): { heating: number; cooling: number } {
-    return { heating: this.heatingEnergyJ / 3_600_000, cooling: this.coolingEnergyJ / 3_600_000 };
+  /** Explicit radiation and ideal emitters get physical stiffness limits too.
+   * Construction/film conduction is implicit; source and longwave terms are conservative substeps.
+   */
+  private thermalStableDt(): number {
+    let limit = 1;
+    const rates = new Float64Array(this.T.length);
+    this.room.sources.forEach((source, j) => {
+      const emitter = getEmitter(source), power = source.powerKW * 1000;
+      if (!power || (source.kind === 'heat' && !this.thermostatHeating)) return;
+      if (this.room.heatingMode === 'underfloor' && source.kind === 'heat') return;
+      if (emitter.kind !== 'ideal' && source.kind === 'heat') limit = Math.min(limit, 2 * Math.max(1, this.emitters[j].capacity) / power);
+      else for(let k=0;k<this.sources[j].cells.length;k++) rates[this.grid.representative[this.sources[j].cells[k]]] += power*this.sources[j].weights[k];
+    });
+    for(const r of this.groups) if(rates[r]) limit=Math.min(limit,2*this.groupCapacity[r]/rates[r]);
+    if(getModel(this.room).radiation) for(const surface of this.surfaces) {
+      if(surface.kind==='aperture') continue;
+      const temperature=this.surfaceTemperature(surface,this.lastEnvironment.outsideC)+273.15;
+      const capacity=surface.column?.capacities[0] ?? (surface.kind==='furniture'?this.furniture[surface.item!].capacity:this.emitters[surface.source!].capacity);
+      const conductance=4*5.670374419e-8*surface.emissivity*surface.area*Math.max(150,temperature)**3;
+      if(capacity>0 && conductance>0) limit=Math.min(limit,.1*capacity/conductance);
+    }
+    return limit;
   }
-
-  thermostatHeatingOn(): boolean { return this.thermostatHeating; }
-
-  reset(): void {
-    this.T.fill(this.params.initialC);
-    this.u.fill(0); this.v.fill(0); this.w.fill(0);
-    this.flowTime = 0;
-    this.elapsed = 0;
-    this.thermostatHeating = true;
-    this.heatingEnergyJ = 0;
-    this.coolingEnergyJ = 0;
-  }
-
-  /** Advance at most the work cap; caller can retain unconsumed time. Zero time does no work. */
   advance(seconds: number): number {
-    if (!Number.isFinite(seconds) || seconds <= 0) return 0;
-    let advanced = 0;
-    for (let i = 0; i < MAX_SUBSTEPS_PER_CALL && advanced < seconds - 1e-9; i++) {
-      const dt = Math.min(this.dt, seconds - advanced);
-      this.step(dt);
-      if (this.convection) {
-        this.flowTime += dt;
-        if (this.flowTime >= FLOW_SECONDS) { this.flowStep(this.flowTime); this.flowTime = 0; }
-      }
-      advanced += dt;
+    if (!Number.isFinite(seconds) || seconds <= 0 || this.failed) return 0;
+    let done = 0;
+    for (let count = 0; count < 16 && done < seconds - 1e-10; count++) {
+      let dt = Math.min(seconds - done, this.recommendedDt, this.thermalStableDt(), 1, this.advecting || this.convection ? this.flow.stableDt(1, this.convection ? this.T : undefined) : 1);
+      if (!Number.isFinite(dt) || dt <= 0) dt = Math.min(seconds - done, .05);
+      // Radiation/emitter stiffness and explicit thermal diffusion restrict this further below.
+      const alpha = Math.max(this.params.alpha, this.params.convectionAlpha, ...[this.flow.eddyDiffusivity?.reduce((m, x) => Math.max(m, x), 0) ?? 0]);
+      dt = Math.min(dt, .4 / (2 * alpha * (1 / this.dx ** 2 + 1 / this.dy ** 2 + 1 / this.dz ** 2)));
+      dt = Math.max(1e-5, dt);
+      this.recommendedDt = Infinity;
+      if (!this.step(dt)) { if (!this.failed && this.recommendedDt < dt) continue; break; }
+      this.elapsed += dt; done += dt;
     }
-    this.elapsed += advanced;
-    return advanced;
+    return done;
   }
-
-  private step(dt: number): void {
-    const control = this.room.thermostat;
-    if (control.enabled) {
-      const mean = this.stats().mean;
-      if (mean >= control.targetC + control.deadbandC / 2) this.thermostatHeating = false;
-      else if (mean <= control.targetC - control.deadbandC / 2) this.thermostatHeating = true;
+  private step(dt: number): boolean {
+    const environment = getEnvironment(this.room, this.elapsed + dt / 2); this.lastEnvironment = environment;
+    const model = getModel(this.room), mean = this.stats().mean;
+    const ventilation = solveVentilation(this.room, mean, { ...environment, orientationDeg: 0 }, this.params.airDensity);
+    this.ventilationACH = ventilation.inflowM3s * 3600 / this.grid.volume.reduce((a, b) => a + b, 0);
+    const boundaries: BoundaryFlow[] = [];
+    const thermalFlows: { cell: number; q: number }[] = [];
+    const boundaryTotals = new Map<string, { axis: 0 | 1; index: number; q: number }>();
+    for (const f of ventilation.flows) {
+      const axis = f.side === 'top' || f.side === 'bottom' ? 1 : 0;
+      const alongSpacing = axis === 0 ? this.dy : this.dx, alongCount = axis === 0 ? this.ny : this.nx;
+      const targets: { index: number; cell: number; area: number }[] = [];
+      const from = f.from ?? f.pos - alongSpacing / 2, to = f.to ?? f.pos + alongSpacing / 2;
+      const bottom = f.bottom ?? f.z - this.dz / 2, top = f.top ?? f.z + this.dz / 2;
+      for (let z = Math.max(0, Math.floor(bottom / this.dz)); z < Math.min(this.nz, Math.ceil(top / this.dz)); z++)
+        for (let along = Math.max(0, Math.floor(from / alongSpacing)); along < Math.min(alongCount, Math.ceil(to / alongSpacing)); along++) {
+          const x = axis === 0 ? f.side === 'left' ? 0 : this.nx - 1 : along;
+          const y = axis === 1 ? f.side === 'top' ? 0 : this.ny - 1 : along;
+          const index = axis === 0 ? this.grid.uIndex(f.side === 'left' ? 0 : this.nx, y, z) : this.grid.vIndex(x, f.side === 'top' ? 0 : this.ny, z);
+          const area = Math.max(0, Math.min(to, (along + 1) * alongSpacing) - Math.max(from, along * alongSpacing)) *
+            Math.max(0, Math.min(top, (z + 1) * this.dz) - Math.max(bottom, z * this.dz)) *
+            (axis === 0 ? this.grid.openU[index] : this.grid.openV[index]) / (alongSpacing * this.dz);
+          const cell = this.index(x, y, z);
+          if (area > 0 && this.capacity[cell]) targets.push({ index, cell, area });
+        }
+      const totalArea = targets.reduce((sum, t) => sum + t.area, 0);
+      if (!totalArea && Math.abs(f.volumeM3s) > 1e-10) { this.failed = 'A ventilation path is blocked by furniture. Move the piece away from the opening.'; return false; }
+      for (const t of targets) {
+        const q = f.volumeM3s * t.area / totalArea;
+        thermalFlows.push({ cell: t.cell, q });
+        const key = `${axis}:${t.index}`, entry = boundaryTotals.get(key) ?? { axis, index: t.index, q: 0 };
+        entry.q += q * (f.side === 'top' || f.side === 'left' ? 1 : -1); boundaryTotals.set(key, entry);
+      }
+    }
+    for (const { axis, index, q } of boundaryTotals.values()) {
+      const area = (axis === 0 ? this.grid.openU : this.grid.openV)[index]; if (area) boundaries.push({ axis, index, velocity: q / area });
+    }
+    const ventilationRates = new Float64Array(this.T.length);
+    for (const f of thermalFlows) ventilationRates[this.grid.representative[f.cell]] += Math.abs(f.q) * this.params.airDensity * this.params.airCp;
+    let ventDt = Infinity;
+    for (const r of this.groups) if (ventilationRates[r]) ventDt = Math.min(ventDt, .5 * this.groupCapacity[r] / ventilationRates[r]);
+    if (dt > ventDt * 1.00001) { this.recommendedDt = ventDt; return false; }
+    this.advecting = this.convection || ventilation.inflowM3s > 1e-10 || [this.flow.u, this.flow.v, this.flow.w].some(v => v.some(n => Math.abs(n) > 1e-6));
+    let ventilationJ = 0;
+    if (this.advecting) {
+      const u = this.flow.u.slice(), v = this.flow.v.slice(), w = this.flow.w.slice();
+      let converged = false;
+      for (let attempt = 0; attempt < 6 && !converged; attempt++) {
+        this.flow.u.set(u); this.flow.v.set(v); this.flow.w.set(w);
+        const steps = 2 ** attempt, step = dt / steps;
+        converged = true;
+        for (let n = 0; n < steps; n++) {
+          const flow = this.flow.step(this.T, step, boundaries, this.convection);
+          this.lastFlow = flow;
+          if (!flow.converged || this.flow.stableDt(step, this.convection ? this.T : undefined) < step * .999) { converged = false; break; }
+        }
+      }
+      if (!converged) {
+        this.flow.u.set(u); this.flow.v.set(v); this.flow.w.set(w);
+        this.failed = 'Airflow could not meet convergence and timestep bounds. Try coarser quality or reduce wind.';
+        return false;
+      }
+      // Scalar heat transport uses the updated flow CFL too (momentum subcycling is independent).
+      const scalarSteps = Math.max(1, Math.ceil(dt / this.flow.stableDt(dt)));
+      for (let n = 0; n < scalarSteps; n++) ventilationJ += this.transport(dt / scalarSteps, thermalFlows, environment.outsideC);
+    } else ventilationJ = this.transport(dt, thermalFlows, environment.outsideC);
+    const sensor = this.room.thermostat.sensor;
+    const measured = sensor?.mode === 'point' ? this.sample(sensor.x, sensor.y, sensor.z) : mean;
+    this.sensorC += (measured - this.sensorC) * (sensor?.lagSeconds ? -Math.expm1(-dt / sensor.lagSeconds) : 1);
+    if (this.room.thermostat.enabled) {
+      const half = this.room.thermostat.deadbandC / 2;
+      if (this.sensorC >= this.room.thermostat.targetC + half) this.thermostatHeating = false;
+      else if (this.sensorC <= this.room.thermostat.targetC - half) this.thermostatHeating = true;
     } else this.thermostatHeating = true;
-    for (const source of this.sources) {
-      if (source.watts > 0 && this.thermostatHeating) this.heatingEnergyJ += source.watts * dt;
-      else if (source.watts < 0) this.coolingEnergyJ -= source.watts * dt;
+    this.loss = emptyLoss();
+    this.externalJ += ventilationJ; this.exchangedJ += Math.abs(ventilationJ); this.loss.ventilationW = -ventilationJ / dt;
+    const powers = this.room.sources.map(s => s.kind === 'cold' ? -1000 * s.powerKW : this.thermostatHeating ? 1000 * s.powerKW : 0);
+    let floorPower = 0;
+    this.room.sources.forEach((s, j) => {
+      const watts = powers[j]; if (watts > 0) this.heatingJ += watts * dt; else this.coolingJ -= watts * dt;
+      if (this.room.heatingMode === 'underfloor' && s.kind === 'heat') floorPower += watts;
+      else if (getEmitter(s).kind !== 'ideal' && s.kind === 'heat') this.emitters[j].temperature += watts * dt / Math.max(1, this.emitters[j].capacity);
+      else for (let n = 0; n < this.sources[j].cells.length; n++) this.addAirHeat(this.sources[j].cells[n], watts * dt * this.sources[j].weights[n]);
+    });
+    const solar = traceSolar(this.room, environment, this.surfaces);
+    this.solarW = solar.transmittedW - solar.escapedW;
+    const radiationW = new Float64Array(this.surfaces.length);
+    if (model.radiation && this.radiation) {
+      const temps = this.radiationGroups.map(group => group.reduce((sum, i) => sum + this.surfaceTemperature(this.surfaces[i], environment.outsideC) * this.surfaces[i].area, 0) / group.reduce((sum, i) => sum + this.surfaces[i].area, 0));
+      const exchanges = this.radiation.exchange(temps);
+      this.radiationGroups.forEach((group, j) => { const area = group.reduce((sum, i) => sum + this.surfaces[i].area, 0); for (const i of group) radiationW[i] = exchanges[j] * this.surfaces[i].area / area; });
     }
-    if (this.hasFurniture) { this.furnishedStep(dt); return; }
-    const { nx, ny, nz, dx, dy, dz, T, next: out, lossUA, cellCap } = this;
-    const alpha = this.convection ? this.params.convectionAlpha : this.params.alpha;
-    const rx = alpha * dt / dx ** 2, ry = alpha * dt / dy ** 2, rz = alpha * dt / dz ** 2;
-    const plane = nx * ny;
-    for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      const i = (z * ny + y) * nx + x;
-      const c = T[i];
-      out[i] = c + rx * ((x > 0 ? T[i - 1] : c) + (x < nx - 1 ? T[i + 1] : c) - 2 * c)
-        + ry * ((y > 0 ? T[i - nx] : c) + (y < ny - 1 ? T[i + nx] : c) - 2 * c)
-        + rz * ((z > 0 ? T[i - plane] : c) + (z < nz - 1 ? T[i + plane] : c) - 2 * c)
-        - lossUA[i] * dt / cellCap * (c - this.room.outsideC);
-    }
-    for (const s of this.sources) {
-      if (s.watts > 0 && !this.thermostatHeating) continue;
-      const dT = s.watts * dt / cellCap / s.cells.length;
-      for (const i of s.cells) out[i] += dT;
-    }
-    this.next = T;
-    this.T = out;
-  }
-
-  /** Pairwise heat transfers conserve energy across air/solid and solid/solid interfaces. */
-  private furnishedStep(dt: number): void {
-    const { nx, ny, nz, T, next: out, capacities, gx, gy, gz } = this;
-    const plane = nx * ny;
-    for (let i = 0; i < T.length; i++) out[i] = T[i] - this.lossUA[i] * dt / capacities[i] * (T[i] - this.room.outsideC);
-    for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      const i = (z * ny + y) * nx + x;
-      if (x < nx - 1) {
-        const heat = gx[i] * dt * (T[i + 1] - T[i]);
-        out[i] += heat / capacities[i]; out[i + 1] -= heat / capacities[i + 1];
-      }
-      if (y < ny - 1) {
-        const heat = gy[i] * dt * (T[i + nx] - T[i]);
-        out[i] += heat / capacities[i]; out[i + nx] -= heat / capacities[i + nx];
-      }
-      if (z < nz - 1) {
-        const heat = gz[i] * dt * (T[i + plane] - T[i]);
-        out[i] += heat / capacities[i]; out[i + plane] -= heat / capacities[i + plane];
-      }
-    }
-    for (const s of this.sources) {
-      if (s.watts > 0 && !this.thermostatHeating) continue;
-      const heat = s.watts * dt / s.cells.length;
-      for (const i of s.cells) out[i] += heat / capacities[i];
-    }
-    this.next = T; this.T = out;
-  }
-
-  private flowStep(dt: number): void {
-    const { nx, ny, nz, dx, dy, dz, u, v, w, T } = this;
-    const uw = nx + 1, vh = ny + 1, plane = nx * ny;
-    const mean = this.stats().mean;
-    const damp = Math.exp(-dt / 4);
-    for (let i = 0; i < u.length; i++) u[i] *= damp * this.openU[i];
-    for (let i = 0; i < v.length; i++) v[i] *= damp * this.openV[i];
-    for (let z = 1; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      const i = (z * ny + y) * nx + x;
-      const faceC = (T[i - plane] + T[i]) / 2;
-      w[i] = this.openW[i] ? w[i] * damp + (9.81 / 293) * dt * (faceC - mean) : 0;
-    }
-    // Weighted projection handles unequal spacings. Exterior normal velocities stay zero.
-    const ax = 1 / dx ** 2, ay = 1 / dy ** 2, az = 1 / dz ** 2;
-    for (let it = 0; it < PRESSURE_ITERATIONS; it++) {
-      for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-        const ui = (z * ny + y) * uw + x;
-        const vi = (z * vh + y) * nx + x;
-        const wi = (z * ny + y) * nx + x;
-        if (this.solid[wi]) continue;
-        const sx0 = this.openU[ui], sx1 = this.openU[ui + 1];
-        const sy0 = this.openV[vi], sy1 = this.openV[vi + nx];
-        const sz0 = this.openW[wi], sz1 = this.openW[wi + plane];
-        const weight = (sx0 + sx1) * ax + (sy0 + sy1) * ay + (sz0 + sz1) * az;
-        if (!weight) continue;
-        const div = (u[ui + 1] - u[ui]) / dx + (v[vi + nx] - v[vi]) / dy + (w[wi + plane] - w[wi]) / dz;
-        const p = -1.6 * div / weight;
-        if (sx0) u[ui] -= p / dx;
-        if (sx1) u[ui + 1] += p / dx;
-        if (sy0) v[vi] -= p / dy;
-        if (sy1) v[vi + nx] += p / dy;
-        if (sz0) w[wi] -= p / dz;
-        if (sz1) w[wi + plane] += p / dz;
-      }
-    }
-    // Equal heat transfers across each internal face conserve energy. CFL substeps keep
-    // explicit upwind transport stable. Subtracting mean reduces projection residual error.
-    let rate = 0;
-    for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      const ui = (z * ny + y) * uw + x, vi = (z * vh + y) * nx + x, wi = (z * ny + y) * nx + x;
-      rate = Math.max(rate, (Math.max(0, u[ui + 1]) + Math.max(0, -u[ui])) / dx + (Math.max(0, v[vi + nx]) + Math.max(0, -v[vi])) / dy + (Math.max(0, w[wi + plane]) + Math.max(0, -w[wi])) / dz);
-    }
-    const steps = Math.max(1, Math.ceil(dt * rate / 0.8));
-    const h = dt / steps;
-    for (let step = 0; step < steps; step++) {
-      const src = this.T, out = this.next;
-      out.set(src);
-      for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-        const i = (z * ny + y) * nx + x;
-        if (x < nx - 1 && this.openU[(z * ny + y) * uw + x + 1]) {
-          const speed = u[(z * ny + y) * uw + x + 1];
-          const flux = h / dx * speed * ((speed > 0 ? src[i] : src[i + 1]) - mean);
-          out[i] -= flux; out[i + 1] += flux;
+    for (const [id, watts] of solar.furnitureW) { const j = this.room.furniture.findIndex(f => f.id === id); if (j >= 0 && this.furniture[j].capacity) this.furniture[j].temperature += watts * dt / this.furniture[j].capacity; }
+    this.externalJ += this.solarW * dt; this.exchangedJ += Math.abs(this.solarW * dt);
+    const floorArea = this.room.widthM * this.room.heightM;
+    for (let j = 0; j < this.surfaces.length; j++) {
+      const surface = this.surfaces[j], contact = this.contacts[j], air = this.contactState(contact);
+      if (!air.capacity) continue;
+      const surfaceC = this.surfaceTemperature(surface, environment.outsideC);
+      // Natural-convection film correlations; solid resistance is handled inside each column.
+      const h = Math.max(.5, (surface.normal[2] ? 1.52 : 1.31) * Math.cbrt(Math.abs(surfaceC - air.temperature))) + (this.advecting ? this.speedAt(surface.center) * 2 : 0);
+      const radiation = radiationW[j], sunlight = solar.patchW[j];
+      if (surface.column) {
+        const ground = surface.kind === 'floorW' && model.floor.boundary !== 'outside';
+        const outsideC = ground ? model.floor.temperatureC : environment.outsideC;
+        const outsideH = this.params.uScale * (ground ? 1000 : exteriorConvection(environment.windMps));
+        let outsideRadiationW = 0, outsideSolarW = 0;
+        if (!ground && model.radiation) {
+          const skyFactor = surface.kind === 'roofW' ? 1 : surface.kind === 'floorW' ? 0 : .5;
+          outsideRadiationW = this.params.uScale * (
+            exteriorLongwaveW(surface.column.outsideC, environment.skyC, surface.area, .9, skyFactor) +
+            exteriorLongwaveW(surface.column.outsideC, environment.outsideC, surface.area, .9, 1 - skyFactor));
         }
-        if (y < ny - 1 && this.openV[(z * vh + y + 1) * nx + x]) {
-          const speed = v[(z * vh + y + 1) * nx + x];
-          const flux = h / dy * speed * ((speed > 0 ? src[i] : src[i + nx]) - mean);
-          out[i] -= flux; out[i + nx] += flux;
+        if (!ground) {
+          const cosine = Math.max(0, -surface.normal.reduce((s, n, a) => s + n * environment.sunDirection[a], 0));
+          outsideSolarW = surface.area * (environment.directWm2 * cosine + environment.diffuseWm2 * (surface.kind === 'roofW' ? 1 : surface.kind === 'floorW' ? 0 : .5)) * (surface.kind === 'openingsW' ? .1 : .6);
         }
-        if (z < nz - 1 && this.openW[i + plane]) {
-          const speed = w[i + plane];
-          const flux = h / dz * speed * ((speed > 0 ? src[i] : src[i + plane]) - mean);
-          out[i] -= flux; out[i + plane] += flux;
+        const last = surface.column.temperatures.length - 1;
+        surface.column.temperatures[last] += (outsideRadiationW + outsideSolarW) * dt / surface.column.capacities[last];
+        const result = surface.column.stepMultiAir(dt, Array.from(contact.cells, (i, n) => ({
+          temperatureC: this.T[i], capacityJPerK: this.groupCapacity[i], conductanceWPerK: h * surface.area * contact.weights[n],
+        })), { temperatureC: outsideC, conductanceWPerK: outsideH * surface.area },
+          surface.kind === 'floorW' ? floorPower * surface.area / floorArea : 0, radiation + sunlight,
+          surface.kind === 'floorW' ? 1 : undefined);
+        for (let n = 0; n < contact.cells.length; n++) for (const i of this.members.get(contact.cells[n])!) this.T[i] = result.airC[n];
+        const outsideJ = result.outsideJ + (outsideRadiationW + outsideSolarW) * dt;
+        this.externalJ += outsideJ; this.exchangedJ += Math.abs(outsideJ);
+        this.loss[surface.kind as 'roofW' | 'floorW' | 'wallsW' | 'openingsW'] -= outsideJ / dt;
+      } else if (surface.kind === 'aperture') {
+        this.externalJ -= radiation * dt; this.exchangedJ += Math.abs(radiation * dt);
+        this.loss.openingsW += radiation;
+      } else {
+        const lump = surface.kind === 'furniture' ? this.furniture[surface.item!] : this.emitters[surface.source!];
+        if (!(lump.capacity > 0)) continue;
+        // Two-lump backward Euler exchange, exact equal-and-opposite energy.
+        lump.temperature += (radiation + sunlight) * dt / lump.capacity;
+        const material = surface.kind === 'furniture' ? FURNITURE_MATERIALS.find(m => m.id === this.room.furniture[surface.item!].material)! : undefined;
+        const conductance = surface.area / (1 / h + (material ? .02 / material.k : 0));
+        let effectiveG = 0, effectiveGT = 0;
+        const responses = Float64Array.from(contact.cells, (i, n) => {
+          const g = conductance * contact.weights[n], c = this.groupCapacity[i];
+          const effective = g * c / (c + dt * g);
+          effectiveG += effective; effectiveGT += effective * this.T[i];
+          return dt * g / (c + dt * g);
+        });
+        lump.temperature = (lump.capacity * lump.temperature + dt * effectiveGT) / (lump.capacity + dt * effectiveG);
+        for (let n = 0; n < contact.cells.length; n++) {
+          const i = contact.cells[n], temperature = this.T[i] + responses[n] * (lump.temperature - this.T[i]);
+          for (const cell of this.members.get(i)!) this.T[cell] = temperature;
         }
       }
-      this.T = out; this.next = src;
     }
+    this.loss.totalW = this.loss.roofW + this.loss.floorW + this.loss.wallsW + this.loss.openingsW + this.loss.ventilationW;
+    this.syncGroups();
+    if (this.T.some(t => !Number.isFinite(t) || t < -273.15 || t > 2000)) { this.failed = 'Temperature integration left the supported range. Reset and check source powers or boundary settings.'; return false; }
+    return true;
   }
-
-  /** Total loss through all six faces, watts. Negative means outside is heating the room. */
-  wallLossW(): number {
-    let watts = 0;
-    for (let i = 0; i < this.T.length; i++) watts += this.lossUA[i] * (this.T[i] - this.room.outsideC);
-    return watts;
+  private surfaceTemperature(s: Surface, outsideC: number): number {
+    return s.column?.insideC ?? (s.kind === 'furniture' ? this.furniture[s.item!].temperature : s.kind === 'emitter' ? this.emitters[s.source!].temperature : outsideC);
   }
-
+  private speedAt(p: readonly number[]) { return Math.hypot(...this.sampleVelocity(p[0], p[1], p[2])); }
+  private transport(dt: number, thermalFlows: readonly { cell: number; q: number }[] = [], outsideC = 20): number {
+    const changes = new Float64Array(this.T.length), stride = [1, this.nx, this.nx * this.ny];
+    const velocity = [this.flow.u, this.flow.v, this.flow.w], rhoCp = this.params.airDensity * this.params.airCp;
+    if (!this.advecting) {
+      for (const { a, b, area, spacing } of this.faces) {
+        const q = dt * rhoCp * this.params.alpha * area / spacing * (this.T[b] - this.T[a]);
+        changes[this.grid.representative[a]] += q; changes[this.grid.representative[b]] -= q;
+      }
+      for (const r of this.groups) for (const i of this.members.get(r)!) this.T[i] += changes[r] / this.groupCapacity[r];
+      return 0;
+    }
+    const lower = this.T.slice(), upper = this.T.slice();
+    const corrections = new Float64Array(this.faces.length);
+    const positive = new Float64Array(this.T.length), negative = new Float64Array(this.T.length);
+    const slope = (i: number, axis: number) => {
+      const pos = axis === 0 ? i % this.nx : axis === 1 ? Math.floor(i / this.nx) % this.ny : Math.floor(i / (this.nx * this.ny));
+      if (pos === 0 || pos === [this.nx, this.ny, this.nz][axis] - 1 || !this.capacity[i - stride[axis]] || !this.capacity[i + stride[axis]]) return 0;
+      return minmod(this.T[i] - this.T[i - stride[axis]], this.T[i + stride[axis]] - this.T[i]);
+    };
+    for (let n = 0; n < this.faces.length; n++) {
+      const { a, b, axis, index, area, spacing } = this.faces[n];
+      const ra = this.grid.representative[a], rb = this.grid.representative[b];
+      lower[ra] = Math.min(lower[ra], this.T[b]); upper[ra] = Math.max(upper[ra], this.T[b]);
+      lower[rb] = Math.min(lower[rb], this.T[a]); upper[rb] = Math.max(upper[rb], this.T[a]);
+      const alpha = this.params.alpha + (this.advecting ? ((this.flow.eddyDiffusivity?.[a] ?? 0) + (this.flow.eddyDiffusivity?.[b] ?? 0)) / 2 : 0);
+      let joules = dt * rhoCp * alpha * area / spacing * (this.T[b] - this.T[a]);
+      if (this.advecting) {
+        const u = velocity[axis][index], courant = Math.min(.5, Math.abs(u) * dt / spacing);
+        const donor = u >= 0 ? this.T[a] : this.T[b];
+        let upstream = u >= 0 ? this.T[a] + .5 * (1 - courant) * slope(a, axis) : this.T[b] - .5 * (1 - courant) * slope(b, axis);
+        upstream = Math.max(Math.min(this.T[a], this.T[b]), Math.min(Math.max(this.T[a], this.T[b]), upstream));
+        joules -= dt * rhoCp * u * area * (donor - 20);
+        const correction = corrections[n] = -dt * rhoCp * u * area * (upstream - donor);
+        if (correction > 0) { positive[ra] += correction; negative[rb] -= correction; }
+        else { negative[ra] += correction; positive[rb] -= correction; }
+      }
+      changes[ra] += joules; changes[rb] -= joules;
+    }
+    // Boundary and internal fluxes use the same old field, preserving local mass cancellation.
+    let ventilationJ = 0;
+    for (const f of thermalFlows) {
+      const r = this.grid.representative[f.cell];
+      const heat = dt * rhoCp * f.q * ((f.q > 0 ? outsideC : this.T[f.cell]) - 20);
+      changes[r] += heat; ventilationJ += heat;
+      if (f.q > 0) { lower[r] = Math.min(lower[r], outsideC); upper[r] = Math.max(upper[r], outsideC); }
+    }
+    // Flux-corrected transport: limit pair corrections by each cell's available
+    // positive/negative energy budget. Unlike cell clamping this preserves energy.
+    for (const r of this.groups) {
+      const baseC = this.T[r] + changes[r] / this.groupCapacity[r];
+      positive[r] = positive[r] > 0 ? Math.min(1, Math.max(0, (upper[r] - baseC) * this.groupCapacity[r]) / positive[r]) : 1;
+      negative[r] = negative[r] < 0 ? Math.min(1, Math.min(0, (lower[r] - baseC) * this.groupCapacity[r]) / negative[r]) : 1;
+    }
+    for (let n = 0; n < this.faces.length; n++) {
+      const { a, b } = this.faces[n], ra = this.grid.representative[a], rb = this.grid.representative[b];
+      const q = corrections[n], limit = q > 0 ? Math.min(positive[ra], negative[rb]) : Math.min(negative[ra], positive[rb]);
+      changes[ra] += limit * q; changes[rb] -= limit * q;
+    }
+    for (const r of this.groups) for (const i of this.members.get(r)!) this.T[i] += changes[r] / this.groupCapacity[r];
+    return ventilationJ;
+  }
+  reset(): void {
+    this.T.fill(this.params.initialC); this.flow.u.fill(0); this.flow.v.fill(0); this.flow.w.fill(0);
+    for (const lump of [...this.furniture, ...this.emitters]) lump.temperature = this.params.initialC;
+    for (const s of this.surfaces) s.column?.reset(this.params.initialC);
+    this.elapsed = this.heatingJ = this.coolingJ = this.externalJ = this.exchangedJ = 0;
+    this.sensorC = this.params.initialC; this.thermostatHeating = true; this.failed = null; this.loss = emptyLoss();
+    this.initialEnergyJ = this.energyJ(); this.recommendedDt = Infinity;
+    this.lastEnvironment = getEnvironment(this.room, 0); this.lastFlow = { residual: 0, maxDivergence: 0, iterations: 0 };
+    this.ventilationACH = this.solarW = 0;
+  }
   energyJ(): number {
-    let sum = 0;
-    for (let i = 0; i < this.T.length; i++) sum += (this.T[i] - this.room.outsideC) * this.capacities[i];
-    return sum;
+    let joules = 0; for (let i = 0; i < this.T.length; i++) joules += this.T[i] * this.capacity[i];
+    for (const s of this.surfaces) if (s.column) joules += s.column.energyJ();
+    for (const lump of [...this.furniture, ...this.emitters]) joules += lump.temperature * lump.capacity;
+    return joules;
   }
-
-  stats(): { min: number; max: number; mean: number } {
-    let min = Infinity, max = -Infinity, sum = 0, count = 0;
-    for (let i = 0; i < this.T.length; i++) {
-      if (this.solid[i]) continue;
-      const t = this.T[i]; min = Math.min(min, t); max = Math.max(max, t); sum += t; count++;
-    }
-    // A room completely filled by coarse solid voxels still has a finite display temperature.
-    if (!count) for (const t of this.T) { min = Math.min(min, t); max = Math.max(max, t); sum += t; count++; }
-    return { min, max, mean: sum / count };
+  diagnostics(): SimulationDiagnostics {
+    const storedEnergyJ = this.energyJ(), energyBalanceJ = storedEnergyJ - this.initialEnergyJ - this.heatingJ + this.coolingJ - this.externalJ;
+    return { storedEnergyJ, energyBalanceJ, relativeEnergyError: Math.abs(energyBalanceJ) / Math.max(1, this.heatingJ + this.coolingJ + this.exchangedJ),
+      surfaceTemperatures: this.surfaces.map(s => ({ id: s.id, label: s.label, temperatureC: this.surfaceTemperature(s, this.lastEnvironment.outsideC) })),
+      sensorC: this.sensorC, ventilationACH: this.ventilationACH, pressureResidual: this.lastFlow.residual, maxDivergence: this.lastFlow.maxDivergence,
+      iterations: this.lastFlow.iterations, failure: this.failed, solarW: this.solarW, outsideC: this.lastEnvironment.outsideC, netExternalJ: this.externalJ };
   }
-
-  furnitureTemperatures(): Record<number, number> {
-    const sums = new Float64Array(this.room.furniture.length), counts = new Uint32Array(sums.length);
-    for (let i = 0; i < this.T.length; i++) if (this.owner[i] >= 0) { sums[this.owner[i]] += this.T[i]; counts[this.owner[i]]++; }
-    return Object.fromEntries(this.room.furniture.flatMap((f, i) => counts[i] ? [[f.id, sums[i] / counts[i]]] : []));
+  heatLossBreakdownW(): HeatLossBreakdown { return { ...this.loss }; }
+  wallLossW(): number { return this.loss.totalW; }
+  energyUseKWh() { return { heating: this.heatingJ / 3_600_000, cooling: this.coolingJ / 3_600_000 }; }
+  thermostatHeatingOn() { return this.thermostatHeating; }
+  furnitureTemperatures(): Record<number, number> { return Object.fromEntries(this.room.furniture.map((f, i) => [f.id, this.furniture[i].temperature])); }
+  stats() {
+    let min = Infinity, max = -Infinity, energy = 0, capacity = 0;
+    for (let i = 0; i < this.T.length; i++) if (this.capacity[i]) { min = Math.min(min, this.T[i]); max = Math.max(max, this.T[i]); energy += this.T[i] * this.capacity[i]; capacity += this.capacity[i]; }
+    return { min, max, mean: energy / capacity };
   }
-
-  isSolid(x: number, y: number, z: number): boolean {
-    const ix = Math.min(this.nx - 1, Math.max(0, Math.floor(x / this.dx)));
-    const iy = Math.min(this.ny - 1, Math.max(0, Math.floor(y / this.dy)));
-    const iz = Math.min(this.nz - 1, Math.max(0, Math.floor(z / this.dz)));
-    return this.solid[(iz * this.ny + iy) * this.nx + ix] === 1;
+  isSolid(x: number, y: number, z: number) {
+    const p = [x, y, z]; return this.boxes.some(parts => parts.some(b => p.every((n, a) => n >= b.min[a] && n <= b.max[a])));
   }
-
-  /** Point in metres, with z above floor. Omitted z samples mid-height. */
   sample(x: number, y: number, z = this.room.ceilingM / 2): number {
-    return trilerp(this.T, this.nx, this.ny, this.nz, x / this.dx - 0.5, y / this.dy - 0.5, z / this.dz - 0.5);
+    const point = [x,y,z], item = this.boxes.findIndex(parts => parts.some(b => point.every((n,a)=>n>=b.min[a] && n<=b.max[a])));
+    if(item>=0) return this.furniture[item].temperature;
+    return weightedTrilerp(this.T, this.grid.volume, this.nx, this.ny, this.nz, x / this.dx - .5, y / this.dy - .5, z / this.dz - .5);
   }
-
-  /** Local simulated airflow in metres/second, sampled on the staggered velocity grids. */
-  sampleVelocity(x: number, y: number, z: number): [number, number, number] {
+  sampleVelocity(x: number, y: number, z: number): Point3 {
     if (this.isSolid(x, y, z)) return [0, 0, 0];
-    return [
-      trilerp(this.u, this.nx + 1, this.ny, this.nz, x / this.dx, y / this.dy - 0.5, z / this.dz - 0.5),
-      trilerp(this.v, this.nx, this.ny + 1, this.nz, x / this.dx - 0.5, y / this.dy, z / this.dz - 0.5),
-      trilerp(this.w, this.nx, this.ny, this.nz + 1, x / this.dx - 0.5, y / this.dy - 0.5, z / this.dz),
-    ];
+    return [trilerp(this.flow.u, this.nx + 1, this.ny, this.nz, x / this.dx, y / this.dy - .5, z / this.dz - .5),
+      trilerp(this.flow.v, this.nx, this.ny + 1, this.nz, x / this.dx - .5, y / this.dy, z / this.dz - .5),
+      trilerp(this.flow.w, this.nx, this.ny, this.nz + 1, x / this.dx - .5, y / this.dy - .5, z / this.dz)];
   }
-
-  /** Heat flux directions sampled throughout the air volume. */
-  vectorField(): HeatFlowVector[] {
-    const vectors: HeatFlowVector[] = [];
-    const spacing = Math.max(2, Math.ceil(Math.max(this.nx, this.ny, this.nz) / 7));
-    const alpha = this.convection ? this.params.convectionAlpha : this.params.alpha;
-    const mean = this.stats().mean;
-    for (let k = 1; k < this.nz; k += spacing) for (let j = 1; j < this.ny; j += spacing) for (let i = 1; i < this.nx; i += spacing) {
-      const x = (i + 0.5) * this.dx, y = (j + 0.5) * this.dy, z = (k + 0.5) * this.dz;
-      if (this.isSolid(x, y, z)) continue;
-      const velocity = this.sampleVelocity(x, y, z), delta = this.sample(x, y, z) - mean;
-      const dx = -alpha * (this.sample(x + this.dx, y, z) - this.sample(x - this.dx, y, z)) / (2 * this.dx) + velocity[0] * delta;
-      const dy = -alpha * (this.sample(x, y + this.dy, z) - this.sample(x, y - this.dy, z)) / (2 * this.dy) + velocity[1] * delta;
-      const dz = -alpha * (this.sample(x, y, z + this.dz) - this.sample(x, y, z - this.dz)) / (2 * this.dz) + velocity[2] * delta;
-      const magnitude = Math.hypot(dx, dy, dz);
-      if (magnitude > 1e-7) vectors.push({ x, y, z, dx, dy, dz, magnitude });
-    }
-    return vectors;
-  }
+  vectorField() { return fieldVectors(this); }
 }

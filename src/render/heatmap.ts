@@ -2,7 +2,7 @@ import { paletteBytes, paletteColor, type PaletteId } from './palette';
 import { dot, project, type Vec3, type ViewTransform } from './camera';
 import { furnitureBoxes, type FurnitureBox } from '../sim/furniture';
 import type { Furniture } from '../sim/config';
-import type { Simulation } from '../sim/simulation';
+import type { SimulationField } from '../sim/field';
 
 export interface RenderView {
   transform: ViewTransform;
@@ -16,7 +16,7 @@ export interface RenderView {
   selectedFurnitureId?: number;
 }
 export interface HeatmapRenderer {
-  render(sim: Simulation, tMin: number, tMax: number, view: RenderView): void;
+  render(sim: SimulationField, tMin: number, tMax: number, view: RenderView): void;
   setPalette(id: PaletteId): void;
   resize(): void;
   dispose(): void;
