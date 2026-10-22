@@ -67,3 +67,41 @@ export function intersectBox(origin: Point3, direction: Point3, box: FurnitureBo
   }
   return far > 1e-5 ? Math.max(0, near) : null;
 }
+
+/** Exact area of a union of axis-aligned rectangles [left,right,bottom,top]. */
+export function unionRectangleArea(rectangles: ReadonlyArray<readonly [number, number, number, number]>): number {
+  const rects = rectangles.filter(([x0, x1, y0, y1]) => x1 > x0 && y1 > y0);
+  const xs = [...new Set(rects.flatMap(([a, b]) => [a, b]))].sort((a, b) => a - b);
+  let area = 0;
+  for (let i = 1; i < xs.length; i++) {
+    const mid = (xs[i - 1] + xs[i]) / 2;
+    const intervals = rects.filter(([a, b]) => a < mid && b > mid).map((r) => [r[2], r[3]]).sort((a, b) => a[0] - b[0]);
+    let length = 0, end = -Infinity;
+    for (const [a, b] of intervals) { if (b > end) { length += b - Math.max(a, end); end = b; } }
+    area += (xs[i] - xs[i - 1]) * length;
+  }
+  return area;
+}
+
+/** Exact union volume; overlapping components (e.g. mattress/headboard) count once. */
+export function unionBoxVolume(boxes: ReadonlyArray<Pick<FurnitureBox, 'min' | 'max'>>): number {
+  const xs = [...new Set(boxes.flatMap((b) => [b.min[0], b.max[0]]))].sort((a, b) => a - b);
+  let volume = 0;
+  for (let i = 1; i < xs.length; i++) {
+    const mid = (xs[i] + xs[i - 1]) / 2;
+    const rectangles = boxes.filter((b) => b.min[0] < mid && b.max[0] > mid).map((b) => [b.min[1], b.max[1], b.min[2], b.max[2]] as const);
+    volume += (xs[i] - xs[i - 1]) * unionRectangleArea(rectangles);
+  }
+  return volume;
+}
+export function furnitureVolume(item: Furniture): number { return unionBoxVolume(furnitureBoxes(item)); }
+
+/** Contact is allowed; only positive solid intersection is an overlap. */
+export function furnitureOverlap(a: Furniture, b: Furniture): boolean {
+  return furnitureBoxes(a).some((aa) => furnitureBoxes(b).some((bb) => aa.min.every((v, axis) => Math.min(aa.max[axis], bb.max[axis]) - Math.max(v, bb.min[axis]) > 1e-9)));
+}
+export function furnitureOverlaps(items: ReadonlyArray<Furniture>): [number, number][] {
+  const pairs: [number, number][] = [];
+  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) if (furnitureOverlap(items[i], items[j])) pairs.push([items[i].id, items[j].id]);
+  return pairs;
+}

@@ -1,3 +1,6 @@
+import { solveVentilation } from './ventilation';
+import { DEFAULT_MODEL, emitterPreset, sanitizeEmitter, sanitizeModel, sanitizeSensor, getModel, wallLayers, roofLayers, floorLayers, type ModelConfig, type SensorConfig, type EmitterConfig } from './model';
+
 export type WallMaterialId = 'brick' | 'concrete' | 'wood' | 'aerated';
 export type InsulationId = 'mineral' | 'eps' | 'pir';
 export type SourceKind = 'heat' | 'cold';
@@ -40,6 +43,7 @@ export interface ThermostatConfig {
   enabled: boolean;
   targetC: number;
   deadbandC: number;
+  sensor?: SensorConfig;
 }
 
 export interface RoofConfig { pitchDeg: number; insulationM: number; material: RoofMaterialId; }
@@ -61,6 +65,7 @@ export interface HeatSource {
   z: number;
   /** Output magnitude in kW. Cold sources remove this much heat. */
   powerKW: number;
+  emitter?: EmitterConfig;
 }
 
 export interface Opening {
@@ -73,6 +78,7 @@ export interface Opening {
   heightM: number;
   sillM: number;
   open: boolean;
+  solarTransmittance?: number;
 }
 
 export interface Probe {
@@ -101,15 +107,16 @@ export interface RoomConfig {
   openings: Opening[];
   probes: Probe[];
   furniture: Furniture[];
+  model?: ModelConfig;
 }
 
 export interface PhysicsParams {
   initialC: number;
-  /** Effective (turbulence-boosted) diffusivity of room air when convection is not simulated, m²/s. */
+  /** Molecular thermal diffusivity of room air, m²/s. */
   alpha: number;
   /** Diffusivity used when convection is simulated explicitly, m²/s. */
   convectionAlpha: number;
-  /** Multiplier on air heat capacity for wall surfaces and unmodelled contents; explicit furniture has its own capacity. */
+  /** Deprecated compatibility multiplier; physical simulations use 1 and explicit thermal storage. */
   massFactor: number;
   airDensity: number;
   airCp: number;
@@ -202,6 +209,7 @@ export const DEFAULT_THERMOSTAT: ThermostatConfig = {
   enabled: false,
   targetC: 20,
   deadbandC: 0.5,
+  sensor: { mode: 'point', x: 2.5, y: 2, z: 1.1, lagSeconds: 30 },
 };
 
 export const DEFAULT_ROOM: RoomConfig = {
@@ -209,22 +217,23 @@ export const DEFAULT_ROOM: RoomConfig = {
   heightM: 4,
   ceilingM: 2.5,
   outsideC: 0,
-  convection: false,
+  convection: true,
   wall: DEFAULT_WALL,
   roof: DEFAULT_ROOF,
   thermostat: DEFAULT_THERMOSTAT,
   heatingMode: 'point',
-  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: 0.4, powerKW: 1.54 }],
+  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: 0.4, powerKW: 1.54, emitter: emitterPreset('radiator') }],
   openings: [],
   probes: [],
   furniture: [],
+  model: DEFAULT_MODEL,
 };
 
 export const DEFAULT_PHYSICS: PhysicsParams = {
   initialC: 20,
-  alpha: 0.02,
-  convectionAlpha: 0.004,
-  massFactor: 5,
+  alpha: 2.2e-5,
+  convectionAlpha: 2.2e-5,
+  massFactor: 1,
   airDensity: 1.2,
   airCp: 1005,
   uScale: 1,
@@ -253,16 +262,25 @@ export function openingU(o: Pick<Opening, 'kind' | 'open'>): number {
   return o.open ? u.open : u.closed;
 }
 
-/** Total heat loss in watts through all walls and openings if the whole room sat at `targetC`. */
+/** Approximate steady sensible heating demand. Ignores solar and sky radiation;
+ * transient air temperatures and emitter temperatures need the full solver. */
 export function holdLossW(room: RoomConfig, targetC: number): number {
-  // The floor uses the wall construction; the ceiling uses the roof insulation.
-  let ua = room.widthM * room.heightM * (wallU(room.wall) + roofU(room.roof));
-  for (const { id } of SIDES) {
-    for (const p of wallRegions(room, id)) {
-      ua += p.u * (p.to - p.from) * (p.top - p.bottom);
-    }
+  const model = getModel(room);
+  const resistance = (layers: ReturnType<typeof wallLayers>) => layers.reduce((r, l) => r + l.thicknessM / l.k, 0);
+  const uWall = 1 / (R_SURFACES + resistance(wallLayers(room)));
+  const uRoof = 1 / (R_SURFACES + resistance(roofLayers(room)));
+  const uFloor = 1 / (0.17 + resistance(floorLayers(room)));
+  const area = room.widthM * room.heightM;
+  const floorBoundary = model.floor.boundary === 'outside' ? room.outsideC : model.floor.temperatureC;
+  let loss = area * (uRoof * (targetC - room.outsideC) + uFloor * (targetC - floorBoundary));
+  for (const { id } of SIDES) for (const p of wallRegions(room, id)) {
+    const opening = room.openings.findLast(o => o.side === id && Math.abs((p.from + p.to) / 2 - o.pos) < o.length / 2 &&
+      (p.bottom + p.top) / 2 > o.sillM && (p.bottom + p.top) / 2 < o.sillM + o.heightM);
+    const u = opening?.open ? 0 : opening ? OPENING_U[opening.kind].closed : uWall;
+    loss += u * (p.to - p.from) * (p.top - p.bottom) * (targetC - room.outsideC);
   }
-  return ua * (targetC - room.outsideC);
+  const ventilation = solveVentilation(room, targetC, { outsideC: room.outsideC, windMps: model.environment.windMps, windDirectionDeg: model.environment.windDirectionDeg });
+  return loss + 1.2 * 1005 * ventilation.inflowM3s * (targetC - room.outsideC);
 }
 
 /** Non-overlapping patches of a vertical wall. The last opening wins where openings overlap. */
@@ -351,8 +369,9 @@ function sanitizeRoof(r: Partial<RoofConfig> | undefined): RoofConfig {
   };
 }
 
-function sanitizeThermostat(t: Partial<ThermostatConfig> | undefined): ThermostatConfig {
+function sanitizeThermostat(t: Partial<ThermostatConfig> | undefined, widthM: number, heightM: number, ceilingM: number): ThermostatConfig {
   return {
+    ...(sanitizeSensor(t?.sensor, widthM, heightM, ceilingM) ? { sensor: sanitizeSensor(t?.sensor, widthM, heightM, ceilingM) } : {}),
     enabled: t?.enabled === true,
     targetC: clamp(t?.targetC ?? DEFAULT_THERMOSTAT.targetC, LIMITS.thermostatTarget.min, LIMITS.thermostatTarget.max),
     deadbandC: clamp(
@@ -383,6 +402,7 @@ export function sanitizeRoom(
       y: clamp(s.y, 0, heightM),
       z: clamp(s.z ?? Math.min(0.4, ceilingM / 2), 0, ceilingM),
       powerKW: clamp(s.powerKW, LIMITS.power.min, LIMITS.power.max),
+      ...(sanitizeEmitter(s.emitter) ? { emitter: sanitizeEmitter(s.emitter) } : {}),
     })),
   );
 
@@ -401,6 +421,7 @@ export function sanitizeRoom(
         heightM: height,
         sillM: clamp(o.sillM ?? (o.kind === 'door' ? 0 : 0.8), 0, ceilingM - height),
         open: o.open === true,
+        ...(o.solarTransmittance === undefined ? {} : { solarTransmittance: clamp(o.solarTransmittance, 0, 1) }),
       };
     }),
   );
@@ -440,7 +461,8 @@ export function sanitizeRoom(
     convection: c.convection === true,
     wall: sanitizeWall(c.wall),
     roof: sanitizeRoof(c.roof),
-    thermostat: sanitizeThermostat(c.thermostat),
+    thermostat: sanitizeThermostat(c.thermostat, widthM, heightM, ceilingM),
+    ...(c.model ? { model: sanitizeModel(c.model) } : {}),
     heatingMode: pick(c.heatingMode, ['point', 'underfloor'], 'point'),
     furniture,
     sources,
