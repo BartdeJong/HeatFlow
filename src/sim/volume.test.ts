@@ -70,7 +70,7 @@ describe('volumetric physics', () => {
   });
 
   it('migrates saved 2D rooms with usable source, probe and opening heights', () => {
-    const r = coerceRoom({ ...DEFAULT_ROOM,
+    const r = coerceRoom({ ...DEFAULT_ROOM, roof: undefined, thermostat: undefined, heatingMode: undefined,
       sources: [{ id: 1, kind: 'heat', x: 1, y: 2, powerKW: 1 }],
       probes: [{ id: 1, x: 3, y: 2 }],
       openings: [{ id: 1, kind: 'door', side: 'left', pos: 1, length: 0.9, open: false }] })!;

@@ -7,7 +7,7 @@
   import { paletteColor } from '../render/palette';
   import { Simulation } from '../sim/simulation';
   import type { Opening } from '../sim/config';
-  import { FURNITURE_PRESETS } from '../sim/config';
+  import { FURNITURE_PRESETS, ROOF_MATERIALS, roofGeometry } from '../sim/config';
   import { furnitureBoxes, intersectBox } from '../sim/furniture';
   import { app, moveItem, recorder, select, updateFurniture, updateOpening } from '../state/app.svelte';
 
@@ -144,6 +144,36 @@
       const p = project(v, a), q = project(v, b);
       ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
     };
+    const polygon = (points: Vec3[], fill: string, stroke: string) => {
+      ctx.beginPath(); points.map((p) => project(v, p)).forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath();
+      ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke();
+    };
+    if (app.exterior) {
+      const { rise, overhangM: o } = roofGeometry(app.room);
+      const t = app.room.wall.thicknessM + app.room.wall.insulationM;
+      const color = ROOF_MATERIALS.find((m) => m.id === app.room.roof.material)!.color;
+      const left = -t - o, right = w + t + o, low = h - o * Math.tan(app.room.roof.pitchDeg * Math.PI / 180);
+      // Translucent exterior keeps the simulation and its controls visible through the shell.
+      polygon([[-t, -t, 0], [w + t, -t, 0], [w + t, -t, h], [-t, -t, h]], '#bfa18418', '#ccb39570');
+      polygon([[w + t, -t, 0], [w + t, l + t, 0], [w + t, l + t, h], [w + t, -t, h]], '#bfa18418', '#ccb39570');
+      polygon([[-t, l + t, 0], [w + t, l + t, 0], [w + t, l + t, h], [-t, l + t, h]], '#bfa18418', '#ccb39570');
+      polygon([[-t, -t, 0], [-t, l + t, 0], [-t, l + t, h], [-t, -t, h]], '#bfa18418', '#ccb39570');
+      for (const y of [-t, l + t]) polygon([[-t, y, h], [w / 2, y, h + rise], [w + t, y, h]], '#bfa18422', '#ccb39570');
+      polygon([[left, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [left, l+t+o, low]], color + '55', color);
+      polygon([[right, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [right, l+t+o, low]], color + '55', color);
+    }
+    if (app.room.heatingMode === 'underfloor' && app.room.sources.some((s) => s.kind === 'heat' && s.powerKW > 0)) {
+      polygon([[0,0,0], [w,0,0], [w,l,0], [0,l,0]], app.stats.thermostatHeating ? '#ff914233' : '#ff914210', '#ff914288');
+    }
+    if (app.showVectors) for (const vector of sim.vectorField()) {
+      const length = Math.min(w, l, h) * 0.16 / vector.magnitude;
+      const a = project(v, [vector.x, vector.y, vector.z]);
+      const b = project(v, [vector.x + vector.dx * length, vector.y + vector.dy * length, vector.z + vector.dz * length]);
+      const angle = Math.atan2(b.y - a.y, b.x - a.x);
+      ctx.strokeStyle = '#ffe8aacc'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      for (const turn of [-0.5, 0.5]) { ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - 5 * Math.cos(angle + turn), b.y - 5 * Math.sin(angle + turn)); }
+      ctx.stroke();
+    }
     for (let x = 0; x <= w; x++) line([x, 0, 0], [x, l, 0], '#ffffff14');
     for (let y = 0; y <= l; y++) line([0, y, 0], [w, y, 0], '#ffffff14');
     for (const z of [0, h]) {
@@ -236,7 +266,7 @@
       const targetMin = Math.floor(displayed.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(displayed.max / 2) * 2);
       const rangeBlend = app.running ? -Math.expm1(-wallDt / 0.2) : 0;
       dispMin += (targetMin - dispMin) * rangeBlend; dispMax += (targetMax - dispMax) * rangeBlend;
-      transform = viewTransform(app.room, camera, canvas.clientWidth, canvas.clientHeight);
+      transform = viewTransform(app.exterior ? { ...app.room, ceilingM: app.room.ceilingM + roofGeometry(app.room).rise + 0.5 } : app.room, camera, canvas.clientWidth, canvas.clientHeight);
       renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, temperatures: displayed, temperatureField: temperatureDisplay,
         furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
       drawOverlay(transform, dispMin, dispMax, wallDt);
@@ -254,7 +284,7 @@
       });
       if (now - lastStats > 200) {
         lastStats = now;
-        Object.assign(app.stats, { elapsed: sim.elapsed, min: s.min, max: s.max, mean: s.mean, tMin: dispMin, tMax: dispMax });
+        Object.assign(app.stats, { elapsed: sim.elapsed, min: s.min, max: s.max, mean: s.mean, tMin: dispMin, tMax: dispMax, heatingKWh: sim.energyUseKWh().heating, coolingKWh: sim.energyUseKWh().cooling, thermostatHeating: sim.thermostatHeatingOn(), heatLoss: sim.heatLossBreakdownW() });
         app.furnitureTemperatures = sim.furnitureTemperatures();
         const values: Record<string, number> = { avg: s.mean };
         for (const p of app.room.probes) values[`p${p.id}`] = sim.sample(p.x, p.y, p.z);

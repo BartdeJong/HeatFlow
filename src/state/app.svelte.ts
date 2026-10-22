@@ -9,8 +9,10 @@ import {
   type FurnitureKind,
   type Opening,
   type OpeningKind,
+  type RoofConfig,
   type RoomConfig,
   type SourceKind,
+  type ThermostatConfig,
   type WallConfig,
 } from '../sim/config';
 import { Recorder } from '../sim/recorder';
@@ -31,6 +33,8 @@ export const app = $state({
   running: true,
   speed: 300 as number,
   palette: 'heat' as PaletteId,
+  exterior: false,
+  showVectors: false,
   view: 'volume' as 'volume' | 'slice',
   showAirflow: true,
   sliceAxis: 'z' as 'x' | 'y' | 'z',
@@ -42,7 +46,8 @@ export const app = $state({
   /** Incremented whenever the recorder gains a sample, so graphs can redraw. */
   graphTick: 0,
   furnitureTemperatures: {} as Record<number, number>,
-  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30 },
+  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30, heatingKWh: 0, coolingKWh: 0, thermostatHeating: true,
+    heatLoss: { roofW: 0, wallsW: 0, floorW: 0, openingsW: 0, totalW: 0 } },
 });
 
 /** Temperature history for the graph; lives outside reactive state because it changes constantly. */
@@ -55,13 +60,21 @@ function edit(fn: (room: RoomConfig) => void): void {
 }
 
 export function updateRoom(
-  patch: Partial<Pick<RoomConfig, 'widthM' | 'heightM' | 'ceilingM' | 'outsideC' | 'convection'>>,
+  patch: Partial<Pick<RoomConfig, 'widthM' | 'heightM' | 'ceilingM' | 'outsideC' | 'convection' | 'heatingMode'>>,
 ): void {
   edit((r) => Object.assign(r, patch));
 }
 
 export function updateWall(patch: Partial<WallConfig>): void {
   edit((r) => Object.assign(r.wall, patch));
+}
+
+export function updateRoof(patch: Partial<RoofConfig>): void {
+  edit((r) => Object.assign(r.roof, patch));
+}
+
+export function updateThermostat(patch: Partial<ThermostatConfig>): void {
+  edit((r) => Object.assign(r.thermostat, patch));
 }
 
 export function setRoom(room: RoomConfig): void {

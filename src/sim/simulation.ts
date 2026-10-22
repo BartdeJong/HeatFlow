@@ -1,5 +1,8 @@
-import { DEFAULT_PHYSICS, FURNITURE_MATERIALS, wallRegions, wallU, type PhysicsParams, type RoomConfig } from './config';
+import { DEFAULT_PHYSICS, FURNITURE_MATERIALS, wallRegions, wallU, roofU, type PhysicsParams, type RoomConfig } from './config';
 import { furnitureBoxes } from './furniture';
+
+export interface HeatLossBreakdown { roofW: number; wallsW: number; floorW: number; openingsW: number; totalW: number; }
+export interface HeatFlowVector { x: number; y: number; z: number; dx: number; dy: number; dz: number; magnitude: number; }
 
 const TARGET_CELLS = 30;
 const CONVECTION_CELLS = 20;
@@ -47,7 +50,7 @@ export class Simulation {
   private room: RoomConfig;
   private sources: { cells: Int32Array; watts: number }[] = [];
   /** Sum of U·area over the exposed faces of each voxel, W/K. */
-  private lossUA: Float32Array;
+  private lossUA: Float64Array;
   private readonly cellCap: number;
   private capacities: Float64Array;
   private owner: Int32Array;
@@ -62,6 +65,10 @@ export class Simulation {
   private openV: Uint8Array;
   private openW: Uint8Array;
   private flowTime = 0;
+  private thermostatHeating = true;
+  private heatingEnergyJ = 0;
+  private coolingEnergyJ = 0;
+  private componentUA!: Record<'roofW' | 'floorW' | 'wallsW' | 'openingsW', Float64Array>;
 
   constructor(room: RoomConfig, params: PhysicsParams = DEFAULT_PHYSICS) {
     this.room = room;
@@ -82,7 +89,7 @@ export class Simulation {
     const n = this.nx * this.ny * this.nz;
     this.T = new Float32Array(n).fill(params.initialC);
     this.next = new Float32Array(n);
-    this.lossUA = new Float32Array(n);
+    this.lossUA = new Float64Array(n);
     this.solid = new Uint8Array(n);
     this.owner = new Int32Array(n).fill(-1);
     this.capacities = new Float64Array(n).fill(this.cellCap);
@@ -154,10 +161,24 @@ export class Simulation {
 
   /** Size, convection mode and furniture are fixed at construction. Other settings update live. */
   setRoom(room: RoomConfig): void {
+    const controlChanged =
+      room.thermostat.enabled !== this.room.thermostat.enabled ||
+      room.thermostat.targetC !== this.room.thermostat.targetC ||
+      room.thermostat.deadbandC !== this.room.thermostat.deadbandC;
+    if (!room.thermostat.enabled) {
+      this.thermostatHeating = true;
+    } else if (controlChanged) {
+      const mean = this.stats().mean;
+      this.thermostatHeating = mean <= room.thermostat.targetC;
+    }
     this.room = room;
     const radius = Math.max(0.25, 1.2 * Math.max(this.dx, this.dy, this.dz));
     this.sources = room.sources.map((s) => {
       const cells: number[] = [];
+      if (s.kind === 'heat' && room.heatingMode === 'underfloor') {
+        for (let y = 0; y < this.ny; y++) for (let x = 0; x < this.nx; x++) cells.push(y * this.nx + x);
+        return { cells: Int32Array.from(cells), watts: s.powerKW * 1000 };
+      }
       let nearest = 0, distance = Infinity;
       for (let z = 0; z < this.nz; z++) for (let y = 0; y < this.ny; y++) for (let x = 0; x < this.nx; x++) {
         const d = ((x + 0.5) * this.dx - s.x) ** 2 + ((y + 0.5) * this.dy - s.y) ** 2 + ((z + 0.5) * this.dz - s.z) ** 2;
@@ -175,10 +196,12 @@ export class Simulation {
     const { nx, ny, nz, dx, dy, dz, lossUA } = this;
     const scale = this.params.uScale;
     lossUA.fill(0);
+    this.componentUA = { roofW: new Float64Array(lossUA.length), floorW: new Float64Array(lossUA.length),
+      wallsW: new Float64Array(lossUA.length), openingsW: new Float64Array(lossUA.length) };
     const floorUA = wallU(this.room.wall) * dx * dy * scale;
     for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-      lossUA[y * nx + x] += floorUA;
-      lossUA[((nz - 1) * ny + y) * nx + x] += floorUA;
+      this.componentUA.floorW[y * nx + x] += floorUA;
+      this.componentUA.roofW[((nz - 1) * ny + y) * nx + x] += roofU(this.room.roof) * dx * dy * scale;
     }
     for (const side of ['top', 'bottom', 'left', 'right'] as const) {
       const horizontal = side === 'top' || side === 'bottom';
@@ -186,24 +209,46 @@ export class Simulation {
       const ds = horizontal ? dx : dy;
       const regions = wallRegions(this.room, side);
       for (let z = 0; z < nz; z++) for (let a = 0; a < count; a++) {
-        let ua = 0;
+        let wallUA = 0, openingUA = 0;
         for (const p of regions) {
           const along = Math.max(0, Math.min((a + 1) * ds, p.to) - Math.max(a * ds, p.from));
           const height = Math.max(0, Math.min((z + 1) * dz, p.top) - Math.max(z * dz, p.bottom));
-          ua += p.u * along * height;
+          if (p.opening) openingUA += p.u * along * height;
+          else wallUA += p.u * along * height;
         }
         const x = horizontal ? a : side === 'left' ? 0 : nx - 1;
         const y = horizontal ? side === 'top' ? 0 : ny - 1 : a;
-        lossUA[(z * ny + y) * nx + x] += ua * scale;
+        const i = (z * ny + y) * nx + x;
+        this.componentUA.wallsW[i] += wallUA * scale;
+        this.componentUA.openingsW[i] += openingUA * scale;
       }
     }
+    for (let i = 0; i < lossUA.length; i++) lossUA[i] = this.componentUA.roofW[i] + this.componentUA.floorW[i] + this.componentUA.wallsW[i] + this.componentUA.openingsW[i];
   }
+
+  heatLossBreakdownW(): HeatLossBreakdown {
+    const result = { roofW: 0, floorW: 0, wallsW: 0, openingsW: 0, totalW: 0 };
+    for (const key of ['roofW', 'floorW', 'wallsW', 'openingsW'] as const) {
+      for (let i = 0; i < this.T.length; i++) result[key] += this.componentUA[key][i] * (this.T[i] - this.room.outsideC);
+      result.totalW += result[key];
+    }
+    return result;
+  }
+
+  energyUseKWh(): { heating: number; cooling: number } {
+    return { heating: this.heatingEnergyJ / 3_600_000, cooling: this.coolingEnergyJ / 3_600_000 };
+  }
+
+  thermostatHeatingOn(): boolean { return this.thermostatHeating; }
 
   reset(): void {
     this.T.fill(this.params.initialC);
     this.u.fill(0); this.v.fill(0); this.w.fill(0);
     this.flowTime = 0;
     this.elapsed = 0;
+    this.thermostatHeating = true;
+    this.heatingEnergyJ = 0;
+    this.coolingEnergyJ = 0;
   }
 
   /** Advance at most the work cap; caller can retain unconsumed time. Zero time does no work. */
@@ -224,6 +269,16 @@ export class Simulation {
   }
 
   private step(dt: number): void {
+    const control = this.room.thermostat;
+    if (control.enabled) {
+      const mean = this.stats().mean;
+      if (mean >= control.targetC + control.deadbandC / 2) this.thermostatHeating = false;
+      else if (mean <= control.targetC - control.deadbandC / 2) this.thermostatHeating = true;
+    } else this.thermostatHeating = true;
+    for (const source of this.sources) {
+      if (source.watts > 0 && this.thermostatHeating) this.heatingEnergyJ += source.watts * dt;
+      else if (source.watts < 0) this.coolingEnergyJ -= source.watts * dt;
+    }
     if (this.hasFurniture) { this.furnishedStep(dt); return; }
     const { nx, ny, nz, dx, dy, dz, T, next: out, lossUA, cellCap } = this;
     const alpha = this.convection ? this.params.convectionAlpha : this.params.alpha;
@@ -238,6 +293,7 @@ export class Simulation {
         - lossUA[i] * dt / cellCap * (c - this.room.outsideC);
     }
     for (const s of this.sources) {
+      if (s.watts > 0 && !this.thermostatHeating) continue;
       const dT = s.watts * dt / cellCap / s.cells.length;
       for (const i of s.cells) out[i] += dT;
     }
@@ -266,6 +322,7 @@ export class Simulation {
       }
     }
     for (const s of this.sources) {
+      if (s.watts > 0 && !this.thermostatHeating) continue;
       const heat = s.watts * dt / s.cells.length;
       for (const i of s.cells) out[i] += heat / capacities[i];
     }
@@ -391,5 +448,24 @@ export class Simulation {
       trilerp(this.v, this.nx, this.ny + 1, this.nz, x / this.dx - 0.5, y / this.dy, z / this.dz - 0.5),
       trilerp(this.w, this.nx, this.ny, this.nz + 1, x / this.dx - 0.5, y / this.dy - 0.5, z / this.dz),
     ];
+  }
+
+  /** Heat flux directions sampled throughout the air volume. */
+  vectorField(): HeatFlowVector[] {
+    const vectors: HeatFlowVector[] = [];
+    const spacing = Math.max(2, Math.ceil(Math.max(this.nx, this.ny, this.nz) / 7));
+    const alpha = this.convection ? this.params.convectionAlpha : this.params.alpha;
+    const mean = this.stats().mean;
+    for (let k = 1; k < this.nz; k += spacing) for (let j = 1; j < this.ny; j += spacing) for (let i = 1; i < this.nx; i += spacing) {
+      const x = (i + 0.5) * this.dx, y = (j + 0.5) * this.dy, z = (k + 0.5) * this.dz;
+      if (this.isSolid(x, y, z)) continue;
+      const velocity = this.sampleVelocity(x, y, z), delta = this.sample(x, y, z) - mean;
+      const dx = -alpha * (this.sample(x + this.dx, y, z) - this.sample(x - this.dx, y, z)) / (2 * this.dx) + velocity[0] * delta;
+      const dy = -alpha * (this.sample(x, y + this.dy, z) - this.sample(x, y - this.dy, z)) / (2 * this.dy) + velocity[1] * delta;
+      const dz = -alpha * (this.sample(x, y, z + this.dz) - this.sample(x, y, z - this.dz)) / (2 * this.dz) + velocity[2] * delta;
+      const magnitude = Math.hypot(dx, dy, dz);
+      if (magnitude > 1e-7) vectors.push({ x, y, z, dx, dy, dz, magnitude });
+    }
+    return vectors;
   }
 }

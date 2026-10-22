@@ -14,18 +14,24 @@
     SPEEDS,
     updateOpening,
     updateRoom,
+    updateRoof,
     updateSource,
+    updateThermostat,
     updateWall,
   } from '../state/app.svelte';
   import {
     INSULATIONS,
     LIMITS,
+    ROOF_MATERIALS,
     SIDES,
     WALL_MATERIALS,
     holdPowerKW,
+    roofU,
     wallLength,
     wallU,
     type InsulationId,
+    type HeatingMode,
+    type RoofMaterialId,
     type WallMaterialId,
     type WallSide,
   } from '../sim/config';
@@ -52,11 +58,13 @@
   }
   const names = $derived(Object.keys(saved).sort());
   const wallUValue = $derived(wallU(app.room.wall));
+  const roofUValue = $derived(roofU(app.room.roof));
   const selectedSource = $derived(
     app.selection?.kind === 'source'
       ? app.room.sources.find((s) => s.id === app.selection!.id)
       : undefined,
   );
+  const heatingPowerKW = $derived(app.room.sources.filter((s) => s.kind === 'heat').reduce((sum, s) => sum + s.powerKW, 0));
   const selectedProbe = $derived(app.selection?.kind === 'probe' ? app.room.probes.find((p) => p.id === app.selection!.id) : undefined);
   const sliceLength = $derived(app.sliceAxis === 'x' ? app.room.widthM : app.sliceAxis === 'y' ? app.room.heightM : app.room.ceilingM);
 
@@ -108,6 +116,10 @@
     const sec = Math.floor(s % 60);
     return h > 0 ? `${h} h ${m} min` : `${m} min ${sec.toString().padStart(2, '0')} s`;
   }
+
+  function fmtPower(w: number): string {
+    return Math.abs(w) >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${w.toFixed(0)} W`;
+  }
 </script>
 
 {#snippet positionControls(item: { id: number; x: number; y: number; z: number }, kind: 'source' | 'probe')}
@@ -147,6 +159,75 @@
   </fieldset>
 
   <fieldset>
+    <legend>Thermostat</legend>
+    <label class="check">
+      <input
+        type="checkbox"
+        checked={app.room.thermostat.enabled}
+        onchange={(e) => updateThermostat({ enabled: e.currentTarget.checked })}
+      />
+      Automatic heating
+    </label>
+    <p
+      class="thermostat-state"
+      class:heating={app.room.thermostat.enabled && heatingPowerKW > 0 && app.stats.thermostatHeating}
+      aria-live="polite"
+    >
+      <strong>Status</strong>
+      {#if !app.room.thermostat.enabled}
+        Off — heat sources run manually
+      {:else if heatingPowerKW <= 0}
+        No powered heat source
+      {:else if !app.running}
+        Simulation paused
+      {:else if app.stats.thermostatHeating}
+        Heating — {heatingPowerKW.toFixed(1)} kW enabled
+      {:else}
+        Holding — resumes at ≤{(app.room.thermostat.targetC - app.room.thermostat.deadbandC / 2).toFixed(2)} °C
+      {/if}
+    </p>
+    <label>
+      <span>Target <output>{app.room.thermostat.targetC.toFixed(1)} °C</output></span>
+      <input
+        type="range"
+        min={LIMITS.thermostatTarget.min}
+        max={LIMITS.thermostatTarget.max}
+        step={LIMITS.thermostatTarget.step}
+        value={app.room.thermostat.targetC}
+        oninput={(e) => updateThermostat({ targetC: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Deadband width <output>{app.room.thermostat.deadbandC.toFixed(1)} °C</output></span>
+      <input
+        type="range"
+        min={LIMITS.thermostatDeadband.min}
+        max={LIMITS.thermostatDeadband.max}
+        step={LIMITS.thermostatDeadband.step}
+        value={app.room.thermostat.deadbandC}
+        oninput={(e) => updateThermostat({ deadbandC: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <p class="hint">
+      Starts off. When enabled, all heat sources run at their set power until the room average reaches target + half the deadband, then pause until it falls below target − half the deadband. Cooling sources remain manual.
+    </p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Energy &amp; heat loss</legend>
+    <dl class="stats">
+      <dt>Heat delivered</dt><dd>{app.stats.heatingKWh.toFixed(3)} kWh</dd>
+      <dt>Cooling delivered</dt><dd>{app.stats.coolingKWh.toFixed(3)} kWh</dd>
+      <dt>Current heat loss</dt><dd>{fmtPower(app.stats.heatLoss.totalW)}</dd>
+      <dt>Roof</dt><dd>{fmtPower(app.stats.heatLoss.roofW)}</dd>
+      <dt>Walls</dt><dd>{fmtPower(app.stats.heatLoss.wallsW)}</dd>
+      <dt>Floor</dt><dd>{fmtPower(app.stats.heatLoss.floorW)}</dd>
+      <dt>Windows &amp; doors</dt><dd>{fmtPower(app.stats.heatLoss.openingsW)}</dd>
+    </dl>
+    <p class="hint">Positive heat loss leaves the room; negative values mean heat is entering from outside. Energy totals accumulate while the simulation runs and clear on reset.</p>
+  </fieldset>
+
+  <fieldset>
     <legend>Display</legend>
     <label>
       Colour palette
@@ -183,7 +264,15 @@
         checked={app.room.convection}
         onchange={(e) => updateRoom({ convection: e.currentTarget.checked })}
       />
-      Convection (hot air rises)
+      Air currents (hot air rises)
+    </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={app.exterior} />
+      House exterior (walls &amp; roof)
+    </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={app.showVectors} />
+      Heat-flow arrows
     </label>
     {#if app.room.convection}
       <label class="check">
@@ -198,6 +287,19 @@
 
   <fieldset>
     <legend>Sources</legend>
+    <label>
+      Heating delivery
+      <select
+        value={app.room.heatingMode}
+        onchange={(e) => updateRoom({ heatingMode: e.currentTarget.value as HeatingMode })}
+      >
+        <option value="point">Point source</option>
+        <option value="underfloor">Underfloor heating</option>
+      </select>
+    </label>
+    {#if app.room.heatingMode === 'underfloor'}
+      <p class="hint">Heat sources distribute their full output evenly across the floor; their position is ignored. Cold sources remain point-based.</p>
+    {/if}
     <div class="row">
       <button onclick={() => addSource('heat')} disabled={app.room.sources.length >= LIMITS.sources}>
         + Heat
@@ -211,7 +313,7 @@
         <li class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}>
           <button class="item" onclick={() => select({ kind: 'source', id: s.id })}>
             <span class="dot {s.kind}"></span>
-            {s.kind === 'heat' ? 'Heat' : 'Cold'} {s.id} · {s.powerKW.toFixed(1)} kW
+            {s.kind === 'cold' ? 'Cold' : app.room.heatingMode === 'underfloor' ? 'Underfloor' : 'Heat'} {s.id} · {s.powerKW.toFixed(1)} kW
           </button>
           <button onclick={() => removeSource(s.id)} aria-label="Remove source {s.id}">🗑</button>
         </li>
@@ -286,7 +388,45 @@
         oninput={(e) => updateWall({ insulationM: e.currentTarget.valueAsNumber })}
       />
     </label>
-    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The same construction covers the floor and ceiling.</p>
+    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The same construction covers the floor.</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Roof</legend>
+    <label>
+      Covering
+      <select
+        value={app.room.roof.material}
+        onchange={(e) => updateRoof({ material: e.currentTarget.value as RoofMaterialId })}
+      >
+        {#each ROOF_MATERIALS as m}<option value={m.id}>{m.label}</option>{/each}
+      </select>
+    </label>
+    <label>
+      <span>Pitch <output>{app.room.roof.pitchDeg.toFixed(0)}°</output></span>
+      <input
+        type="range"
+        min={LIMITS.pitch.min}
+        max={LIMITS.pitch.max}
+        step={LIMITS.pitch.step}
+        value={app.room.roof.pitchDeg}
+        oninput={(e) => updateRoof({ pitchDeg: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Roof insulation <output>{(app.room.roof.insulationM * 100).toFixed(0)} cm</output></span>
+      <input
+        type="range"
+        min={LIMITS.roofInsulation.min}
+        max={LIMITS.roofInsulation.max}
+        step={LIMITS.roofInsulation.step}
+        value={app.room.roof.insulationM}
+        oninput={(e) => updateRoof({ insulationM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <p class="hint">
+      Roof U-value <output>{roofUValue.toFixed(2)} W/m²K</output>. The covering is visual only.
+    </p>
   </fieldset>
 
   <fieldset>
@@ -358,7 +498,7 @@
         </label>
       </div>
     {/each}
-    <p class="hint">Click a window or door on the room wall to open or close it. Open ones lose a lot of heat.</p>
+    <p class="hint">Windows and doors can sit in any vertical wall. Click one on the wall to open or close it. Open ones lose a lot of heat.</p>
   </fieldset>
 
   <fieldset>
@@ -423,7 +563,7 @@
         oninput={(e) => updateRoom({ outsideC: e.currentTarget.valueAsNumber })}
       />
     </label>
-    <p class="hint">Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
+    <p class="hint">The room uses X for width, Y for length, and Z for height. Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
   </fieldset>
 
   <fieldset>
@@ -569,6 +709,23 @@
     margin: 0;
     font-size: 12px;
     color: #7c849a;
+  }
+  .thermostat-state {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0;
+    padding: 7px 9px;
+    border-radius: 6px;
+    background: #262a35;
+    color: #9aa3b8;
+    font-size: 12px;
+  }
+  .thermostat-state strong {
+    color: #d1d5df;
+  }
+  .thermostat-state.heating {
+    color: #ffb27a;
   }
   .check {
     flex-direction: row;

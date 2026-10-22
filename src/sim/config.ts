@@ -1,6 +1,7 @@
 export type WallMaterialId = 'brick' | 'concrete' | 'wood' | 'aerated';
 export type InsulationId = 'mineral' | 'eps' | 'pir';
 export type SourceKind = 'heat' | 'cold';
+export type HeatingMode = 'point' | 'underfloor';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
 export type FurnitureKind = 'sofa' | 'table' | 'cabinet' | 'bed';
@@ -32,6 +33,16 @@ export const FURNITURE_PRESETS: ReadonlyArray<{ id: FurnitureKind; label: string
   { id: 'cabinet', label: 'Cabinet', widthM: 1.2, depthM: 0.5, heightM: 1.8, material: 'wood' },
   { id: 'bed', label: 'Bed', widthM: 1.6, depthM: 2, heightM: 0.6, material: 'fabric' },
 ];
+
+export type RoofMaterialId = 'tiles' | 'slate' | 'metal' | 'thatch';
+
+export interface ThermostatConfig {
+  enabled: boolean;
+  targetC: number;
+  deadbandC: number;
+}
+
+export interface RoofConfig { pitchDeg: number; insulationM: number; material: RoofMaterialId; }
 
 export interface WallConfig {
   material: WallMaterialId;
@@ -71,8 +82,10 @@ export interface Probe {
   z: number;
 }
 
+/** Volumetric room: x is width, y is floor-plan length, z is height above floor. */
 export interface RoomConfig {
   widthM: number;
+  /** Length of the room, i.e. its depth into the screen (front to back), m. */
   heightM: number;
   /** Vertical room dimension, metres. heightM is the floor-plan length (y). */
   ceilingM: number;
@@ -81,6 +94,9 @@ export interface RoomConfig {
   /** Simulate buoyancy-driven airflow in all three dimensions; z points up. */
   convection: boolean;
   wall: WallConfig;
+  roof: RoofConfig;
+  thermostat: ThermostatConfig;
+  heatingMode: HeatingMode;
   sources: HeatSource[];
   openings: Opening[];
   probes: Probe[];
@@ -114,6 +130,29 @@ export const INSULATIONS: ReadonlyArray<{ id: InsulationId; label: string; k: nu
   { id: 'pir', label: 'PIR board', k: 0.022 },
 ];
 
+export const ROOF_MATERIALS: ReadonlyArray<{ id: RoofMaterialId; label: string; color: string }> = [
+  { id: 'tiles', label: 'Clay tiles', color: '#b5523b' },
+  { id: 'slate', label: 'Slate', color: '#4b5563' },
+  { id: 'metal', label: 'Metal', color: '#8a97a6' },
+  { id: 'thatch', label: 'Thatch', color: '#b59a58' },
+];
+
+/** Roof structure (tiles, battens, ceiling) plus inside/outside surface resistance, m²K/W. */
+const R_ROOF_BASE = 0.3;
+const K_ROOF_INSULATION = 0.04;
+
+/** U-value of the roof/ceiling construction in W/m²K. */
+export function roofU(roof: Pick<RoofConfig, 'insulationM'>): number {
+  return 1 / (R_ROOF_BASE + roof.insulationM / K_ROOF_INSULATION);
+}
+
+/** Gable roof (seen from the side) whose ridge runs along the room's length; the roof sits on the outer walls. */
+export function roofGeometry(room: Pick<RoomConfig, 'widthM' | 'roof' | 'wall'>, overhangM = 0.3) {
+  const wallT = room.wall.thicknessM + room.wall.insulationM;
+  const rise = (room.widthM / 2 + wallT) * Math.tan((room.roof.pitchDeg * Math.PI) / 180);
+  return { rise, overhangM };
+}
+
 export const SIDES: ReadonlyArray<{ id: WallSide; label: string }> = [
   { id: 'top', label: 'Back (y = 0)' },
   { id: 'right', label: 'Right' },
@@ -139,6 +178,10 @@ export const LIMITS = {
   power: { min: 0, max: 10, step: 0.1 },
   thickness: { min: 0.05, max: 0.5, step: 0.01 },
   insulation: { min: 0, max: 0.2, step: 0.01 },
+  pitch: { min: 10, max: 60, step: 1 },
+  roofInsulation: { min: 0, max: 0.3, step: 0.01 },
+  thermostatTarget: { min: 5, max: 30, step: 0.5 },
+  thermostatDeadband: { min: 0.2, max: 3, step: 0.1 },
   openingLength: { min: 0.3, step: 0.1 },
   sources: 8,
   openings: 8,
@@ -153,6 +196,14 @@ export const DEFAULT_WALL: WallConfig = {
   insulationM: 0.02,
 };
 
+export const DEFAULT_ROOF: RoofConfig = { pitchDeg: 35, insulationM: 0.1, material: 'tiles' };
+
+export const DEFAULT_THERMOSTAT: ThermostatConfig = {
+  enabled: false,
+  targetC: 20,
+  deadbandC: 0.5,
+};
+
 export const DEFAULT_ROOM: RoomConfig = {
   widthM: 5,
   heightM: 4,
@@ -160,7 +211,10 @@ export const DEFAULT_ROOM: RoomConfig = {
   outsideC: 0,
   convection: false,
   wall: DEFAULT_WALL,
-  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: 0.4, powerKW: 1.83 }],
+  roof: DEFAULT_ROOF,
+  thermostat: DEFAULT_THERMOSTAT,
+  heatingMode: 'point',
+  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: 0.4, powerKW: 1.54 }],
   openings: [],
   probes: [],
   furniture: [],
@@ -201,8 +255,8 @@ export function openingU(o: Pick<Opening, 'kind' | 'open'>): number {
 
 /** Total heat loss in watts through all walls and openings if the whole room sat at `targetC`. */
 export function holdLossW(room: RoomConfig, targetC: number): number {
-  // Floor and ceiling use the same construction and outside temperature as the walls.
-  let ua = 2 * room.widthM * room.heightM * wallU(room.wall);
+  // The floor uses the wall construction; the ceiling uses the roof insulation.
+  let ua = room.widthM * room.heightM * (wallU(room.wall) + roofU(room.roof));
   for (const { id } of SIDES) {
     for (const p of wallRegions(room, id)) {
       ua += p.u * (p.to - p.from) * (p.top - p.bottom);
@@ -216,12 +270,12 @@ export function wallRegions(room: RoomConfig, side: WallSide) {
   const openings = room.openings.filter((o) => o.side === side);
   const xs = [...new Set([0, wallLength(room, side), ...openings.flatMap((o) => [o.pos - o.length / 2, o.pos + o.length / 2])])].sort((a, b) => a - b);
   const zs = [...new Set([0, room.ceilingM, ...openings.flatMap((o) => [o.sillM, o.sillM + o.heightM])])].sort((a, b) => a - b);
-  const regions: { from: number; to: number; bottom: number; top: number; u: number }[] = [];
+  const regions: { from: number; to: number; bottom: number; top: number; u: number; opening: boolean }[] = [];
   for (let z = 1; z < zs.length; z++) for (let x = 1; x < xs.length; x++) {
     const cx = (xs[x - 1] + xs[x]) / 2;
     const cz = (zs[z - 1] + zs[z]) / 2;
     const opening = openings.findLast((o) => Math.abs(cx - o.pos) < o.length / 2 && cz > o.sillM && cz < o.sillM + o.heightM);
-    regions.push({ from: xs[x - 1], to: xs[x], bottom: zs[z - 1], top: zs[z], u: opening ? openingU(opening) : wallU(room.wall) });
+    regions.push({ from: xs[x - 1], to: xs[x], bottom: zs[z - 1], top: zs[z], u: opening ? openingU(opening) : wallU(room.wall), opening: !!opening });
   }
   return regions;
 }
@@ -285,8 +339,37 @@ export function sanitizeWall(w: Partial<WallConfig> | undefined): WallConfig {
   };
 }
 
+function sanitizeRoof(r: Partial<RoofConfig> | undefined): RoofConfig {
+  return {
+    pitchDeg: clamp(r?.pitchDeg ?? DEFAULT_ROOF.pitchDeg, LIMITS.pitch.min, LIMITS.pitch.max),
+    insulationM: clamp(
+      r?.insulationM ?? DEFAULT_ROOF.insulationM,
+      LIMITS.roofInsulation.min,
+      LIMITS.roofInsulation.max,
+    ),
+    material: pick(r?.material, ROOF_MATERIALS.map((m) => m.id), DEFAULT_ROOF.material),
+  };
+}
+
+function sanitizeThermostat(t: Partial<ThermostatConfig> | undefined): ThermostatConfig {
+  return {
+    enabled: t?.enabled === true,
+    targetC: clamp(t?.targetC ?? DEFAULT_THERMOSTAT.targetC, LIMITS.thermostatTarget.min, LIMITS.thermostatTarget.max),
+    deadbandC: clamp(
+      t?.deadbandC ?? DEFAULT_THERMOSTAT.deadbandC,
+      LIMITS.thermostatDeadband.min,
+      LIMITS.thermostatDeadband.max,
+    ),
+  };
+}
+
 /** Clamp every value into its valid range and drop malformed entries. Accepts untrusted input. */
-export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
+export function sanitizeRoom(
+  c: Partial<Omit<RoomConfig, 'roof' | 'thermostat'>> & {
+    roof?: Partial<RoofConfig>;
+    thermostat?: Partial<ThermostatConfig>;
+  },
+): RoomConfig {
   const widthM = clamp(c.widthM, LIMITS.size.min, LIMITS.size.max);
   const heightM = clamp(c.heightM, LIMITS.size.min, LIMITS.size.max);
   const ceilingM = clamp(c.ceilingM ?? DEFAULT_ROOM.ceilingM, LIMITS.size.min, LIMITS.size.max);
@@ -356,10 +439,13 @@ export function sanitizeRoom(c: Partial<RoomConfig>): RoomConfig {
     outsideC,
     convection: c.convection === true,
     wall: sanitizeWall(c.wall),
+    roof: sanitizeRoof(c.roof),
+    thermostat: sanitizeThermostat(c.thermostat),
+    heatingMode: pick(c.heatingMode, ['point', 'underfloor'], 'point'),
+    furniture,
     sources,
     openings,
     probes,
-    furniture,
   };
 }
 
@@ -399,6 +485,30 @@ export function coerceRoom(v: unknown): RoomConfig | null {
     return legacyRoom(c.widthM, c.heightM, c.powerKW, c.uValue, c.sourceX, c.sourceY);
   }
   if (typeof c.widthM === 'number' && typeof c.heightM === 'number' && Array.isArray(c.sources)) {
+    // main's side-section saves have roof settings but no vertical coordinates.
+    // Lift their section into the middle of the floor plan, with screen-up becoming +Z.
+    const sectionSources = entries<HeatSource>(c.sources, LIMITS.sources);
+    const sectionProbes = entries<Probe>(c.probes, LIMITS.probes);
+    const sectionOpenings = entries<Opening>(c.openings, LIMITS.openings);
+    const sectionFurniture = entries<Furniture>(c.furniture, LIMITS.furniture);
+    const items = [...sectionSources, ...sectionProbes];
+    const section = c.roof && (items.some((item) => !('z' in item)) ||
+      sectionOpenings.some((o) => !('heightM' in o)) || sectionFurniture.some((f) => !('material' in f)));
+    if (section) {
+      const depth = c.heightM as number;
+      const ceiling = typeof c.ceilingM === 'number' ? c.ceilingM : DEFAULT_ROOM.ceilingM;
+      const converted = { ...c } as Partial<RoomConfig>;
+      converted.sources = sectionSources.map((s) => ({ ...s, y: depth / 2, z: ceiling - (s.y ?? ceiling / 2) })) as HeatSource[];
+      converted.probes = sectionProbes.map((p) => ({ ...p, y: depth / 2, z: ceiling - (p.y ?? ceiling / 2) })) as Probe[];
+      converted.openings = sectionOpenings.map((o) => ({ ...o,
+        pos: depth / 2, length: o.kind === 'door' ? 0.9 : 1.2,
+        heightM: o.length, sillM: ceiling - (o.pos ?? ceiling / 2) - (o.length ?? 1.2) / 2,
+      })) as Opening[];
+      converted.furniture = sectionFurniture.map((f) => ({ ...FURNITURE_PRESETS.find((p) => p.id === f.kind),
+        ...f, y: depth / 2, rotation: 0,
+      })) as Furniture[];
+      return sanitizeRoom(converted);
+    }
     return sanitizeRoom(c as Partial<RoomConfig>);
   }
   return null;

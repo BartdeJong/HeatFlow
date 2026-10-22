@@ -43,7 +43,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 
 ## Known limitations
 - Convection is a simplified 3D buoyancy model (20 cells along the longest dimension, not full CFD); toggling it restarts the simulation.
-- Floor and ceiling use the wall construction and outside temperature; separate ground/roof boundary conditions are not modelled.
+- The floor uses the wall construction and the ceiling uses roof insulation. Both exchange heat with outside air; a separate ground temperature is not modelled.
 - Cold sources are plain heat sinks (AC / draught) with no thermostat setpoint.
 - Open windows/doors are modelled as a high loss coefficient, not real airflow.
 - Palette choice is not saved or shared.
@@ -59,7 +59,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Convective airflow (hot air rises; buoyancy + pressure projection)
 - ✅ Thermal camera palette
 - ✅ Overlay graph: temperature over time (room average + up to 3 draggable probes)
-- ✅ Share/save format v4, including furniture, source/probe Z coordinates and opening height/sill (old links and saves still load)
+- ✅ Share/save format v5, including furniture, source/probe Z coordinates and opening height/sill (old links and saves still load)
 - ✅ Real-time (1×) and 10× simulation speeds
 - ✅ Adjustable room length, width and ceiling height
 - ✅ Adjustable outside temperature
@@ -71,11 +71,17 @@ Legend: ✅ done · 🚧 in progress · ⬜ not started
 - ✅ Furniture redirects airflow, stores heat and exchanges it with air; combined thermal energy is conserved
 - ✅ Furniture temperature readouts and geometry shared by physics, rendering, picking and trail occlusion
 
+- ✅ Translucent house exterior with adjustable roof pitch and covering
+- ✅ Separate roof insulation and U-value
+- ✅ Optional thermostat with target and deadband controls
+- ✅ Underfloor heating over the floor area
+- ✅ Cumulative heating/cooling energy and component heat-loss readouts
+- ✅ Heat-flow arrows in the 3D air volume
+
 ## Add-later (all ⬜)
 - Humidity & moisture
 - Custom room shapes / multi-room
 - Multi-floor
-- Vector field arrows
 - Time-lapse playback
 - Floor plan import
 - Insulation database

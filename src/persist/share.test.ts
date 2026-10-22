@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_ROOM, sanitizeRoom, wallU, type RoomConfig } from '../sim/config';
+import { DEFAULT_ROOM, coerceRoom, sanitizeRoom, wallU, type RoomConfig } from '../sim/config';
 import { decodeRoom, encodeRoom, roomFromHash, shareUrl } from './share';
 
 const full: RoomConfig = {
@@ -9,6 +9,9 @@ const full: RoomConfig = {
   outsideC: -7,
   convection: true,
   wall: { material: 'wood', thicknessM: 0.15, insulation: 'pir', insulationM: 0.08 },
+  roof: { pitchDeg: 48, insulationM: 0.22, material: 'slate' },
+  thermostat: { enabled: true, targetC: 21.5, deadbandC: 0.8 },
+  heatingMode: 'underfloor',
   sources: [
     { id: 1, kind: 'heat', x: 1.2, y: 3, z: 0.4, powerKW: 2.4 },
     { id: 2, kind: 'cold', x: 5, y: 1, z: 2.8, powerKW: 0.8 },
@@ -43,6 +46,15 @@ describe('share', () => {
     const room = decodeRoom(btoa(JSON.stringify(arr)))!;
     expect(room.ceilingM).toBe(2.5);
     expect(room.outsideC).toBe(0);
+    expect(room.roof).toEqual(DEFAULT_ROOM.roof);
+  });
+
+  it('loads older v2 links with default thermostat and furniture', () => {
+    const code = btoa(JSON.stringify([2, 5, 4, 0, 0, 0.2, 0, 0, [], [], []]));
+    const room = decodeRoom(code)!;
+    expect(room.thermostat).toEqual(DEFAULT_ROOM.thermostat);
+    expect(room.furniture).toEqual(DEFAULT_ROOM.furniture);
+    expect(room.heatingMode).toBe('point');
   });
 
   it('migrates version 2 sources, probes and openings to 3D', () => {
@@ -75,6 +87,36 @@ describe('share', () => {
       { id: 4, kind: 'bed', material: 'fabric', x: 2, y: 6, widthM: 1.6, depthM: 2, heightM: 0.6, rotation: 90 },
     ] });
     expect(decodeRoom(encodeRoom(room))).toEqual(room);
+  });
+
+  it('loads version 4 furniture links with default roof and thermostat settings', () => {
+    const arr = JSON.parse(atob(encodeRoom(full)));
+    arr[0] = 4;
+    arr.length = 14;
+    const loaded = decodeRoom(btoa(JSON.stringify(arr)))!;
+    expect(loaded.furniture).toEqual(full.furniture);
+    expect(loaded.sources).toEqual(full.sources);
+    expect(loaded.roof).toEqual(DEFAULT_ROOM.roof);
+    expect(loaded.thermostat).toEqual(DEFAULT_ROOM.thermostat);
+    expect(loaded.heatingMode).toBe('point');
+  });
+
+  it('migrates main side-section links and saves while preserving heating settings', () => {
+    const arr = [2, 6, 4, 1, 0, 0.2, 0, 0.02, [[0, 1, 2.5, 2]], [[1, 3, 2, 2, 1]], [[3, 1]], 3, -5,
+      48, 0.22, 1, 1, 21.5, 0.8, [[0, 1.6]], 1];
+    const loaded = decodeRoom(btoa(JSON.stringify(arr)))!;
+    expect(loaded.sources[0]).toMatchObject({ x: 1, y: 2, z: 0.5, powerKW: 2 });
+    expect(loaded.probes[0]).toMatchObject({ x: 3, y: 2, z: 2 });
+    expect(loaded.openings[0]).toMatchObject({ side: 'left', pos: 2, heightM: 2, sillM: 0, open: true });
+    expect(loaded.furniture[0]).toMatchObject({ kind: 'sofa', x: 1.6, y: 2, material: 'fabric' });
+    expect(loaded.roof).toEqual(full.roof);
+    expect(loaded.thermostat).toEqual(full.thermostat);
+    expect(loaded.heatingMode).toBe('underfloor');
+    const saved = coerceRoom({ ...loaded, sources: [{ id: 1, kind: 'heat', x: 1, y: 2.5, powerKW: 2 }],
+      probes: [{ id: 1, x: 3, y: 1 }], openings: [{ id: 1, kind: 'door', side: 'left', pos: 2, length: 2, open: true }],
+      furniture: [{ id: 1, kind: 'sofa', x: 1.6 }] });
+    expect(saved).toEqual(loaded);
+    expect(decodeRoom(encodeRoom(loaded))).toEqual(loaded);
   });
 
   it('rejects malformed furniture rows', () => {
