@@ -1,94 +1,56 @@
-# HeatFlow – Feature Tracker
+# HeatFlow feature tracker
 
-Legend: ✅ done · 🚧 in progress · ⬜ not started
+Legend: ✅ implemented · ⬜ future work or unverified acceptance
 
-## Tech decisions
-- Vite + Svelte 5 + TypeScript
-- WebGL2 3D texture volume rendering + palette shader, projected Canvas2D fallback
-- Physically calibrated units (m, °C, W, W/m²K)
-- Static hosting (GitHub Pages workflow in `.github/workflows/deploy.yml`)
+## Simulation and physics
 
-## MVP
+- ✅ 3D room geometry with physical units; editable width, length and ceiling height
+- ✅ Actual air heat capacity and free volume, independent layered building storage
+- ✅ Conservative implicit multilayer conduction with separate inside/outside surface films
+- ✅ Ground, adjoining-room and outdoor floor boundaries
+- ✅ Delayed underfloor slab response and heat release after switch-off
+- ✅ Ideal heat/cold sources and radiator/convector storage/emission presets
+- ✅ Positioned or room-average thermostat sensing with lag and deadband
+- ✅ Cached diffuse-gray radiosity, reciprocal view factors and furniture visibility
+- ✅ Exact furniture union mass/volume, partial fluid cells, open face areas and small-cell merging
+- ✅ Furniture surface convection, material resistance and per-piece thermal storage
+- ✅ Solid overlap rejection and imported overlap diagnostics
+- ✅ Wind/stack pressure-network ventilation, bidirectional openings and closed-envelope leakage
+- ✅ Separate construction and ventilation loss accounting
+- ✅ Staggered 3D momentum, physical viscosity, no-slip surfaces and Smagorinsky mixing
+- ✅ Conservative bounded second-order heat transport and adaptive CFL-limited steps
+- ✅ Residual pressure convergence, separate disconnected air regions and failure diagnostics
+- ✅ Deterministic daily weather, orientation, window solar transmittance and furniture shading
+- ✅ Exterior solar absorption, wind convection and sky/ground longwave exchange
+- ✅ Fixed-reference stored energy and explicit source/external energy ledger
 
-### Core simulation
-- ✅ Single heat source (drag-and-drop point source; also keyboard arrows)
-- ✅ Adjustable heat source output (kW)
-- ✅ 3D room geometry, adjustable width, length and ceiling height (2–10 m)
-- ✅ Walls with a uniform insulation value (now derived from material + insulation layers)
-- ✅ 3D grid thermal diffusion model (finite volume, stable dt, unit-tested)
-- ✅ Real-time heatmap (smooth, bilinear-filtered gradient with adaptive scale)
+## Interaction and runtime
 
-### Controls
-- ✅ Heat source intensity slider (kW)
-- ✅ Global wall insulation slider
-- ✅ Play / pause
-- ✅ Reset
-- ✅ Simulation speed selector (extra)
-- ✅ Hover temperature readout + legend (extra)
+- ✅ Rotatable/zoomable 3D heat clouds, X/Y/Z slices, hover readouts and palettes
+- ✅ Source/probe dragging, Shift-drag height, keyboard movement and coordinate controls
+- ✅ Placeable/resizable/rotatable sofas, tables, cabinets and beds
+- ✅ Airflow trails, heat-flow arrows and translucent illustrated house exterior
+- ✅ Main-thread rendering with a module-worker solver and transferable field snapshots
+- ✅ Stable display field identity; generation/revision rejection of stale snapshots
+- ✅ Worker-side histories sampled in simulated time and achieved-speed reporting
+- ✅ Coarse/Balanced/Fine 24/32/48-cell quality with reset on quality changes
+- ✅ Simple presets and an Advanced physics panel for construction/environment/sensor/emitter inputs
+- ✅ Local named saves and v6 sharing, with v1–v5 compatibility readers
+- ✅ Heating/cooling consumption, surface temperatures, component losses and energy diagnostics
+- ✅ Vite/Svelte/TypeScript build, static hosting workflow and numerical regression tests
 
-### UI & interaction
-- ✅ Rotatable 3D room, zoom, temperature volume and X/Y/Z slices
-- ✅ Sidebar with grouped controls
-- ✅ Efficient WebGL rendering
-- ✅ Basic mobile support (stacked layout, touch drag, large targets)
+## Model limits and validation still required
 
-### Persistence & sharing
-- ✅ Save/load/delete named room configurations (localStorage)
-- ✅ Shareable URL with encoded settings (`#c=…`, validated and clamped on load)
+- Furniture temperature is lumped per piece, not spatially resolved within each solid.
+- Surface radiation uses geometric quadrature and grouped furniture faces; solar tracing samples apertures.
+- Weather and material presets are synthetic/generic; the roof illustration has no attic air volume.
+- Browser-scale turbulence and ventilation are approximations. One benchmark or a single grid comparison does not establish general building-design accuracy.
+- ⬜ Expanded room scenarios and turbulent-flow benchmark coverage
+- ⬜ Sustained interaction performance and ≥30 FPS measurements on a named reference laptop
+- ⬜ Real-device mobile performance checks
+- ⬜ Humidity, moisture, condensation and occupant comfort models
+- ⬜ Custom floor plans, multiple rooms/floors, thermal bridges and detailed glazing
+- ⬜ Live weather, measured calibration data, product/insulation databases and sensor integration
+- ⬜ Time-lapse playback, exports, reports and user-shared preset library
 
-### Release
-- ✅ README
-- ✅ CI + GitHub Pages deploy workflow (runs once pushed to `main` with Pages enabled)
-- ⬜ Real-device mobile performance check
-
-## Known limitations
-- Convection is a simplified 3D buoyancy model (20 cells along the longest dimension, not full CFD); toggling it restarts the simulation.
-- The floor uses the wall construction and the ceiling uses roof insulation. Both exchange heat with outside air; a separate ground temperature is not modelled.
-- Cold sources are plain heat sinks (AC / draught) with no thermostat setpoint.
-- Open windows/doors are modelled as a high loss coefficient, not real airflow.
-- Palette choice is not saved or shared.
-- Room starts at 20 °C; outside temperature is adjustable (−30…40 °C) but constant over time.
-- Changing room size restarts the simulation.
-- Furniture changes restart the simulation. Solid parts use coarse voxels, so thin parts expand to grid cells and narrow gaps can close.
-
-## Added after the MVP
-- ✅ Windows & doors with open/closed state (click them on the wall or use the sidebar)
-- ✅ Multiple heat sources (up to 8)
-- ✅ Cold sources (AC, drafts, leaks)
-- ✅ Wall materials (brick, concrete, wood, aerated concrete) + thickness + insulation type/thickness
-- ✅ Convective airflow (hot air rises; buoyancy + pressure projection)
-- ✅ Thermal camera palette
-- ✅ Overlay graph: temperature over time (room average + up to 3 draggable probes)
-- ✅ Share/save format v5, including furniture, source/probe Z coordinates and opening height/sill (old links and saves still load)
-- ✅ Real-time (1×) and 10× simulation speeds
-- ✅ Adjustable room length, width and ceiling height
-- ✅ Adjustable outside temperature
-- ✅ Heat loss through all six faces, with exact rectangular opening areas
-- ✅ 3D source/probe positioning: drag, Shift-drag height, keyboard and coordinate sliders
-- ✅ Energy-conserving 3D convection with buoyancy along Z
-- ✅ Interior heat clouds and temperature-coloured airflow trails following the simulated 3D velocity field
-- ✅ Placeable, resizable, rotatable sofas, tables, cabinets and beds, with wood/upholstery/metal materials
-- ✅ Furniture redirects airflow, stores heat and exchanges it with air; combined thermal energy is conserved
-- ✅ Furniture temperature readouts and geometry shared by physics, rendering, picking and trail occlusion
-
-- ✅ Translucent house exterior with adjustable roof pitch and covering
-- ✅ Separate roof insulation and U-value
-- ✅ Optional thermostat with target and deadband controls
-- ✅ Underfloor heating over the floor area
-- ✅ Cumulative heating/cooling energy and component heat-loss readouts
-- ✅ Heat-flow arrows in the 3D air volume
-
-## Add-later (all ⬜)
-- Humidity & moisture
-- Custom room shapes / multi-room
-- Multi-floor
-- Time-lapse playback
-- Floor plan import
-- Insulation database
-- IoT sensors
-- Video export
-- Heat-loss reports
-- Efficiency scoring
-- Plugin system
-- Preset library
-- User-shared simulations
+See [VALIDATION.md](./VALIDATION.md) for test scenarios, tolerances and the limits of current evidence.
