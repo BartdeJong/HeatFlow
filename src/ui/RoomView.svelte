@@ -5,7 +5,9 @@
   import { AirflowTrails, airflowHighlight } from '../render/airflow';
   import { TemperatureDisplay } from '../render/temperature';
   import { paletteColor } from '../render/palette';
-  import { Simulation } from '../sim/simulation';
+  import { SimulationClient } from '../sim/runtime';
+  import type { SimulationField } from '../sim/field';
+  import { getEmitter } from '../sim/model';
   import type { Opening } from '../sim/config';
   import { FURNITURE_PRESETS, ROOF_MATERIALS, roofGeometry } from '../sim/config';
   import { furnitureBoxes, intersectBox } from '../sim/furniture';
@@ -15,12 +17,10 @@
   let overlay: HTMLCanvasElement;
   let roomEl: HTMLDivElement;
   let renderer: HeatmapRenderer | undefined;
-  let sim = new Simulation($state.snapshot(app.room));
-  const simulationKey = () => `${app.room.widthM}|${app.room.heightM}|${app.room.ceilingM}|${app.room.convection}|${JSON.stringify(app.room.furniture)}`;
-  let simKey = simulationKey();
+  const client = new SimulationClient();
+  const sim = client.field;
   let camera = defaultCamera();
   let transform: ViewTransform | undefined;
-  let pendingSeconds = 0;
   let drag: { kind: 'source' | 'probe' | 'furniture'; id: number; x: number; y: number; z: number; px: number; py: number } | null = null;
   let orbit: { px: number; py: number } | null = null;
   let hoverRaw: { px: number; py: number } | null = null;
@@ -31,24 +31,20 @@
   const boxes = $derived(app.room.furniture.flatMap(furnitureBoxes));
   const airflow = new AirflowTrails();
   const temperatureDisplay = new TemperatureDisplay();
-  let airflowSim: Simulation | undefined;
+  let airflowSim: SimulationField | undefined;
   let airflowSeedsKey = "";
 
   $effect(() => {
-    const key = simulationKey();
-    untrack(() => {
-      if (key === simKey) return;
-      simKey = key; sim = new Simulation($state.snapshot(app.room));
-      pendingSeconds = 0; recorder.clear(); app.graphTick++;
-    });
+    const room = $state.snapshot(app.room);
+    untrack(() => client.configure(room));
   });
   $effect(() => {
-    const r = $state.snapshot(app.room);
-    untrack(() => sim.setRoom(r));
+    const running = app.running, speed = app.speed;
+    untrack(() => client.setControl(running, speed));
   });
   $effect(() => {
     app.resetToken;
-    untrack(() => { sim.reset(); airflow.reset(); temperatureDisplay.reset(); pendingSeconds = 0; recorder.clear(); app.graphTick++; });
+    untrack(() => { client.reset(); airflow.reset(); temperatureDisplay.reset(); recorder.clear(); app.graphTick++; });
   });
   $effect(() => { renderer?.setPalette(app.palette); });
   $effect(() => { app.cameraToken; untrack(() => { camera = defaultCamera(); }); });
@@ -162,6 +158,16 @@
       polygon([[left, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [left, l+t+o, low]], color + '55', color);
       polygon([[right, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [right, l+t+o, low]], color + '55', color);
     }
+    if(app.room.heatingMode !== 'underfloor') for(const source of app.room.sources) {
+      const emitter=getEmitter(source); if(emitter.kind==='ideal' || source.kind==='cold') continue;
+      const size=[emitter.widthM,emitter.depthM,emitter.heightM], center=[source.x,source.y,source.z];
+      const min=center.map((n,a)=>Math.max(0,n-size[a]/2)), max=center.map((n,a)=>Math.min([w,l,h][a],n+size[a]/2));
+      for(let axis=0;axis<3;axis++) for(const sign of [0,1]) {
+        const other=[0,1,2].filter(a=>a!==axis);
+        const points=[[0,0],[1,0],[1,1],[0,1]].map(([a,b])=>{ const p=[...min] as Vec3; p[axis]=sign?max[axis]:min[axis];p[other[0]]=a?max[other[0]]:min[other[0]];p[other[1]]=b?max[other[1]]:min[other[1]];return p; });
+        polygon(points, '#d7e1eb30', '#d7e1eb99');
+      }
+    }
     if (app.room.heatingMode === 'underfloor' && app.room.sources.some((s) => s.kind === 'heat' && s.powerKW > 0)) {
       polygon([[0,0,0], [w,0,0], [w,l,0], [0,l,0]], app.stats.thermostatHeating ? '#ff914233' : '#ff914210', '#ff914288');
     }
@@ -253,14 +259,25 @@
 
   onMount(() => {
     renderer = createRenderer(canvas, app.palette);
-    let raf = 0, last = performance.now(), lastStats = 0;
+    let generation = -1;
+    client.onError = message => { app.running = false; app.stats.diagnostics.failure = message; };
+    client.onUpdate = snapshot => {
+      if (snapshot.generation !== generation) {
+        generation = snapshot.generation; airflow.reset(); temperatureDisplay.reset();
+      }
+      Object.assign(app.stats, snapshot.stats, { elapsed: snapshot.elapsed, heatingKWh: snapshot.energy.heating,
+        coolingKWh: snapshot.energy.cooling, thermostatHeating: snapshot.thermostatHeating,
+        heatLoss: snapshot.heatLoss, achievedSpeed: snapshot.achievedSpeed, diagnostics: snapshot.diagnostics });
+      app.furnitureTemperatures = snapshot.furnitureTemps;
+      recorder.times = snapshot.history.times; recorder.series = new Map(snapshot.history.series); app.graphTick++;
+      if (snapshot.diagnostics.failure) app.running = false;
+    };
+    let raf = 0, last = performance.now(), lastStats = 0, fpsSince = performance.now(), fpsFrames = 0;
     let dispMin = app.stats.tMin, dispMax = app.stats.tMax;
     const frame = (now: number) => {
+      fpsFrames++;
+      if(now-fpsSince>=1000) { app.stats.renderFPS=fpsFrames*1000/(now-fpsSince); fpsSince=now; fpsFrames=0; }
       const wallDt = Math.min(0.1, (now - last) / 1000); last = now;
-      if (app.running) {
-        pendingSeconds = Math.min(60, pendingSeconds + wallDt * app.speed);
-        pendingSeconds -= sim.advance(pendingSeconds);
-      } else pendingSeconds = 0;
       const s = sim.stats();
       const displayed = temperatureDisplay.update(sim, app.running ? wallDt : 0);
       const targetMin = Math.floor(displayed.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(displayed.max / 2) * 2);
@@ -283,12 +300,7 @@
         return { id: f.id, label: FURNITURE_PRESETS.find((item) => item.id === f.kind)!.label, px: p.x, py: p.y };
       });
       if (now - lastStats > 200) {
-        lastStats = now;
-        Object.assign(app.stats, { elapsed: sim.elapsed, min: s.min, max: s.max, mean: s.mean, tMin: dispMin, tMax: dispMax, heatingKWh: sim.energyUseKWh().heating, coolingKWh: sim.energyUseKWh().cooling, thermostatHeating: sim.thermostatHeatingOn(), heatLoss: sim.heatLossBreakdownW() });
-        app.furnitureTemperatures = sim.furnitureTemperatures();
-        const values: Record<string, number> = { avg: s.mean };
-        for (const p of app.room.probes) values[`p${p.id}`] = sim.sample(p.x, p.y, p.z);
-        if (recorder.record(sim.elapsed, values)) app.graphTick++;
+        lastStats = now; app.stats.tMin = dispMin; app.stats.tMax = dispMax;
         hover = null;
         if (hoverRaw && !drag && !orbit) {
           const axis = app.view === 'slice' ? ['x', 'y', 'z'].indexOf(app.sliceAxis) as 0 | 1 | 2 : 2;
@@ -300,7 +312,7 @@
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
-    return () => { cancelAnimationFrame(raf); renderer?.dispose(); };
+    return () => { cancelAnimationFrame(raf); client.dispose(); renderer?.dispose(); };
   });
 </script>
 

@@ -28,6 +28,9 @@ export class Recorder {
     for (const k of [...this.series.keys()]) if (!keys.has(k)) this.series.delete(k);
   }
 
+  /** Worker caps advancement at this time, independently of wall-time publishing. */
+  get nextSampleAt(): number { return this.nextAt; }
+
   /** Store a sample if enough simulated time has passed. Returns true when a sample was taken. */
   record(elapsed: number, values: Record<string, number>): boolean {
     if (elapsed < this.nextAt) return false;

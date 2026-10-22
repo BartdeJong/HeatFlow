@@ -38,6 +38,7 @@
   import { PALETTES, PALETTE_IDS, paletteCssGradient, type PaletteId } from '../render/palette';
   import Graph from './Graph.svelte';
   import FurniturePanel from './FurniturePanel.svelte';
+  import PhysicsPanel from './PhysicsPanel.svelte';
   import { deleteRoom, listSavedRooms, saveRoom } from '../persist/storage';
   import { shareUrl } from '../persist/share';
 
@@ -52,7 +53,7 @@
     if (!res) return;
     updateSource(id, { powerKW: res.kW });
     holdMsg = res.reachable
-      ? `Set to ${res.kW.toFixed(2)} kW – the room should settle near 20 °C.`
+      ? `Estimated steady demand: ${res.kW.toFixed(2)} kW. Sun, sky cooling and transient storage can change the result.`
       : `20 °C can't be reached with this source (limit ${res.kW.toFixed(2)} kW).`;
     setTimeout(() => (holdMsg = ''), 4000);
   }
@@ -153,10 +154,13 @@
     </label>
     <dl class="stats">
       <dt>Elapsed</dt><dd>{fmtTime(app.stats.elapsed)}</dd>
+      <dt>Achieved speed</dt><dd>{app.stats.achievedSpeed.toFixed(1)}× of {app.speed}× requested</dd>
       <dt>Air average</dt><dd>{app.stats.mean.toFixed(1)} °C</dd>
       <dt>Hottest air</dt><dd>{app.stats.max.toFixed(1)} °C</dd>
     </dl>
   </fieldset>
+
+  <PhysicsPanel />
 
   <fieldset>
     <legend>Thermostat</legend>
@@ -209,7 +213,7 @@
       />
     </label>
     <p class="hint">
-      Starts off. When enabled, all heat sources run at their set power until the room average reaches target + half the deadband, then pause until it falls below target − half the deadband. Cooling sources remain manual.
+      When enabled, all heat sources run at their set power until the configured sensor reaches target + half the deadband, then pause until it falls below target − half the deadband. Cooling sources remain manual.
     </p>
   </fieldset>
 
@@ -293,12 +297,12 @@
         value={app.room.heatingMode}
         onchange={(e) => updateRoom({ heatingMode: e.currentTarget.value as HeatingMode })}
       >
-        <option value="point">Point source</option>
+        <option value="point">Individual emitters</option>
         <option value="underfloor">Underfloor heating</option>
       </select>
     </label>
     {#if app.room.heatingMode === 'underfloor'}
-      <p class="hint">Heat sources distribute their full output evenly across the floor; their position is ignored. Cold sources remain point-based.</p>
+      <p class="hint">Heat sources warm the floor slab; their position is ignored. The slab releases stored heat after switch-off. Cold sources remain point-based.</p>
     {/if}
     <div class="row">
       <button onclick={() => addSource('heat')} disabled={app.room.sources.length >= LIMITS.sources}>
@@ -335,7 +339,7 @@
         />
       </label>
       {@render positionControls(selectedSource, 'source')}
-      <button onclick={() => holdSource(selectedSource.id)}>⚖ Hold room at 20 °C</button>
+      <button onclick={() => holdSource(selectedSource.id)}>⚖ Estimate power for 20 °C</button>
       {#if holdMsg}<p class="hint">{holdMsg}</p>{/if}
     {:else}
       <p class="hint">Select a source to adjust its power and 3D position. Drag it to move; Shift-drag to change height.</p>
@@ -388,7 +392,7 @@
         oninput={(e) => updateWall({ insulationM: e.currentTarget.valueAsNumber })}
       />
     </label>
-    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The same construction covers the floor.</p>
+    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The floor has its own construction in Physical model.</p>
   </fieldset>
 
   <fieldset>

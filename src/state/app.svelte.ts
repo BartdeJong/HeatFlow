@@ -18,7 +18,8 @@ import {
 import { Recorder } from '../sim/recorder';
 import { roomFromHash } from '../persist/share';
 import type { PaletteId } from '../render/palette';
-import { furnitureExtent } from '../sim/furniture';
+import { furnitureExtent, furnitureOverlap } from '../sim/furniture';
+import { getModel, emitterPreset, type ModelConfig } from '../sim/model';
 
 export const SPEEDS = [1, 10, 30, 100, 300, 1000] as const;
 
@@ -46,8 +47,9 @@ export const app = $state({
   /** Incremented whenever the recorder gains a sample, so graphs can redraw. */
   graphTick: 0,
   furnitureTemperatures: {} as Record<number, number>,
-  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30, heatingKWh: 0, coolingKWh: 0, thermostatHeating: true,
-    heatLoss: { roofW: 0, wallsW: 0, floorW: 0, openingsW: 0, totalW: 0 } },
+  placementMessage: '',
+  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30, renderFPS: 0, achievedSpeed: 0, diagnostics: { storedEnergyJ: 0, energyBalanceJ: 0, relativeEnergyError: 0, sensorC: 20, ventilationACH: 0, pressureResidual: 0, maxDivergence: 0, iterations: 0, failure: null as string | null, solarW: 0, outsideC: 0, netExternalJ: 0, surfaceTemperatures: [] as { id: string; label: string; temperatureC: number }[] }, heatingKWh: 0, coolingKWh: 0, thermostatHeating: true,
+    heatLoss: { roofW: 0, wallsW: 0, floorW: 0, openingsW: 0, ventilationW: 0, totalW: 0 } },
 });
 
 /** Temperature history for the graph; lives outside reactive state because it changes constantly. */
@@ -65,6 +67,20 @@ export function updateRoom(
   edit((r) => Object.assign(r, patch));
 }
 
+export function updateModel(patch: Partial<ModelConfig>): void {
+  const oldQuality = getModel(app.room).quality;
+  edit((r) => { r.model = { ...getModel(r), ...patch }; });
+  if (getModel(app.room).quality !== oldQuality) app.resetToken++;
+}
+
+export function furnitureWarnings(room: RoomConfig): string[] {
+  const warnings: string[] = [];
+  for (let i = 0; i < room.furniture.length; i++) for (let j = i + 1; j < room.furniture.length; j++) {
+    if (furnitureOverlap(room.furniture[i], room.furniture[j])) warnings.push(`Furniture ${room.furniture[i].id} overlaps furniture ${room.furniture[j].id}. Move or remove one item.`);
+  }
+  return warnings;
+}
+
 export function updateWall(patch: Partial<WallConfig>): void {
   edit((r) => Object.assign(r.wall, patch));
 }
@@ -80,6 +96,7 @@ export function updateThermostat(patch: Partial<ThermostatConfig>): void {
 export function setRoom(room: RoomConfig): void {
   app.room = sanitizeRoom(room);
   app.selection = null;
+  app.placementMessage = furnitureWarnings(app.room).join(' ');
   app.resetToken++;
 }
 
@@ -114,6 +131,7 @@ export function addSource(kind: SourceKind): void {
       y: r.heightM * fy,
       z: kind === 'heat' ? 0.4 : Math.max(0.4, r.ceilingM - 0.5),
       powerKW: kind === 'heat' ? 1.5 : 1,
+      ...(kind === 'heat' ? { emitter: emitterPreset('radiator') } : {}),
     });
   });
   app.selection = { kind: 'source', id };
@@ -201,17 +219,31 @@ export function addFurniture(kind: FurnitureKind): void {
       }
       if (found) break;
     }
-    r.furniture.push({ id, kind, material: preset.material, x, y, widthM, depthM, heightM: preset.heightM, rotation: 0 });
+    const candidate: Furniture = { id, kind, material: preset.material, x, y, widthM, depthM, heightM: preset.heightM, rotation: 0 };
+    if (r.furniture.some((f) => furnitureOverlap(f, candidate))) {
+      app.placementMessage = 'No space for this furniture. Move an item or choose a smaller size.';
+      return;
+    }
+    app.placementMessage = '';
+    r.furniture.push(candidate);
   });
-  select({ kind: 'furniture', id });
+  if (app.room.furniture.some((f) => f.id === id)) select({ kind: 'furniture', id });
 }
 
 export function updateFurniture(id: number, patch: Partial<Omit<Furniture, 'id'>>): void {
-  edit((r) => { const f = r.furniture.find((item) => item.id === id); if (f) Object.assign(f, patch); });
+  const room = sanitizeRoom({ ...$state.snapshot(app.room), furniture: app.room.furniture.map((f) => f.id === id ? { ...f, ...patch } : f) });
+  const candidate = room.furniture.find((f) => f.id === id);
+  if (candidate && room.furniture.some((f) => f.id !== id && furnitureOverlap(f, candidate))) {
+    app.placementMessage = 'Furniture cannot overlap. Choose a free position or smaller dimensions.';
+    return;
+  }
+  app.placementMessage = furnitureWarnings(room).join(' ');
+  app.room = room;
 }
 
 export function removeFurniture(id: number): void {
   edit((r) => { r.furniture = r.furniture.filter((f) => f.id !== id); });
+  app.placementMessage = furnitureWarnings(app.room).join(' ');
   if (app.selection?.kind === 'furniture' && app.selection.id === id) select(null);
 }
 
