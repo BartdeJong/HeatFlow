@@ -1,4 +1,5 @@
 import type { GridGeometry } from './grid';
+import { BoxPressureSolver } from './box-pressure';
 
 export interface BoundaryFlow { axis: 0 | 1 | 2; index: number; velocity: number }
 export interface FlowResult { converged: boolean; residual: number; maxDivergence: number; iterations: number }
@@ -30,6 +31,7 @@ export class FlowSolver {
   private readonly direction: Float64Array;
   private readonly preconditioned: Float64Array;
   private readonly product: Float64Array;
+  private readonly boxPressure?: BoxPressureSolver;
 
   constructor(readonly grid: GridGeometry, private readonly options: { smagorinskyCs?: number } = {}) {
     const g = grid, { nx, ny, nz } = g;
@@ -67,6 +69,13 @@ export class FlowSolver {
     this.componentCount = components;
     this.pressure = new Float64Array(n); this.rhs = new Float64Array(n); this.residual = new Float64Array(n);
     this.direction = new Float64Array(n); this.preconditioned = new Float64Array(n); this.product = new Float64Array(n);
+    const fullVolume = g.dx * g.dy * g.dz;
+    const fullEdgeCount = (nx - 1) * ny * nz + nx * (ny - 1) * nz + nx * ny * (nz - 1);
+    if (n === g.volume.length && this.edges.length === fullEdgeCount &&
+      g.volume.every(v => Math.abs(v - fullVolume) < 1e-12 * fullVolume) &&
+      this.edges.every(e => Math.abs(e.area * e.distance - fullVolume) < 1e-12 * fullVolume)) {
+      this.boxPressure = new BoxPressureSolver([nx, ny, nz], [g.dx, g.dy, g.dz]);
+    }
   }
   private addEdge(ca: number, cb: number, axis: 0 | 1 | 2, face: number, distance: number) {
     const a = this.node[ca], b = this.node[cb], area = this.openings[axis][face];
@@ -161,29 +170,41 @@ export class FlowSolver {
     for (let c = 0; c < componentNet.length; c++) if (Math.abs(componentNet[c]) > 1e-9 * Math.max(1, componentGross[c])) {
       return { converged: false, residual: Math.abs(componentNet[c]), maxDivergence: Infinity, iterations: 0 };
     }
-    let rhsNorm = 0;
-    for (let n = 0; n < this.rhs.length; n++) { if (this.anchors[n]) this.rhs[n] = 0; rhsNorm += this.rhs[n] ** 2; }
-    rhsNorm = Math.sqrt(rhsNorm);
-    if (!rhsNorm) this.pressure.fill(0);
-    this.multiply(this.pressure, this.product);
-    let initialNorm = 0;
-    for (let n = 0; n < this.rhs.length; n++) {
-      const r = this.rhs[n] - this.product[n]; this.residual[n] = r; initialNorm += r * r;
-      this.direction[n] = this.preconditioned[n] = this.diagonal[n] > 0 ? r / this.diagonal[n] : 0;
-    }
-    let rz = dot(this.residual, this.preconditioned), relativeResidual = rhsNorm ? Math.sqrt(initialNorm) / rhsNorm : 0, iterations = 0;
-    const tolerance = 1e-7; // Stricter than public 1e-5 gate to control divergence in small cut cells.
-    const limit = Math.min(2000, Math.max(50, this.rhs.length));
-    while (relativeResidual > tolerance && iterations < limit) {
-      this.multiply(this.direction, this.product);
-      const denominator = dot(this.direction, this.product);
-      if (!(denominator > 0) || !Number.isFinite(rz)) break;
-      const alpha = rz / denominator;
-      let rNorm = 0;
-      for (let n = 0; n < this.rhs.length; n++) { this.pressure[n] += alpha * this.direction[n]; this.residual[n] -= alpha * this.product[n]; rNorm += this.residual[n] ** 2; this.preconditioned[n] = this.diagonal[n] > 0 ? this.residual[n] / this.diagonal[n] : 0; }
-      const nextRz = dot(this.residual, this.preconditioned), beta = nextRz / rz;
-      for (let n = 0; n < this.rhs.length; n++) this.direction[n] = this.preconditioned[n] + beta * this.direction[n];
-      rz = nextRz; relativeResidual = Math.sqrt(rNorm) / rhsNorm; iterations++;
+    let relativeResidual = 0, iterations = 0;
+    if (this.boxPressure) {
+      this.boxPressure.solve(this.rhs, this.pressure);
+      // Verify the actual residual with the same graph used by the general solver.
+      this.multiply(this.pressure, this.product);
+      let error = 0, norm = 0;
+      for (let n = 0; n < this.rhs.length; n++) if (!this.anchors[n]) { error += (this.rhs[n] - this.product[n]) ** 2; norm += this.rhs[n] ** 2; }
+      relativeResidual = norm ? Math.sqrt(error / norm) : 0;
+      iterations = 1;
+    } else {
+      let rhsNorm = 0;
+      for (let n = 0; n < this.rhs.length; n++) { if (this.anchors[n]) this.rhs[n] = 0; rhsNorm += this.rhs[n] ** 2; }
+      rhsNorm = Math.sqrt(rhsNorm);
+      if (!rhsNorm) this.pressure.fill(0);
+      this.multiply(this.pressure, this.product);
+      let initialNorm = 0;
+      for (let n = 0; n < this.rhs.length; n++) {
+        const r = this.rhs[n] - this.product[n]; this.residual[n] = r; initialNorm += r * r;
+        this.direction[n] = this.preconditioned[n] = this.diagonal[n] > 0 ? r / this.diagonal[n] : 0;
+      }
+      let rz = dot(this.residual, this.preconditioned);
+      relativeResidual = rhsNorm ? Math.sqrt(initialNorm) / rhsNorm : 0;
+      const tolerance = 1e-7; // Stricter than public 1e-5 gate to control divergence in small cut cells.
+      const limit = Math.min(2000, Math.max(50, this.rhs.length));
+      while (relativeResidual > tolerance && iterations < limit) {
+        this.multiply(this.direction, this.product);
+        const denominator = dot(this.direction, this.product);
+        if (!(denominator > 0) || !Number.isFinite(rz)) break;
+        const alpha = rz / denominator;
+        let rNorm = 0;
+        for (let n = 0; n < this.rhs.length; n++) { this.pressure[n] += alpha * this.direction[n]; this.residual[n] -= alpha * this.product[n]; rNorm += this.residual[n] ** 2; this.preconditioned[n] = this.diagonal[n] > 0 ? this.residual[n] / this.diagonal[n] : 0; }
+        const nextRz = dot(this.residual, this.preconditioned), beta = nextRz / rz;
+        for (let n = 0; n < this.rhs.length; n++) this.direction[n] = this.preconditioned[n] + beta * this.direction[n];
+        rz = nextRz; relativeResidual = Math.sqrt(rNorm) / rhsNorm; iterations++;
+      }
     }
     for (const e of this.edges) this.arrays[e.axis][e.face] -= dt * (this.pressure[e.b] - this.pressure[e.a]) / e.distance;
     this.enforceBoundaries(boundary);

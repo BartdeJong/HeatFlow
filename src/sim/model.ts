@@ -13,7 +13,7 @@ export interface EnvironmentConfig {
   sunAzimuthDeg: number; startHour: number; skyOffsetC: number;
 }
 export interface ModelConfig {
-  quality: 'coarse' | 'balanced' | 'fine';
+  quality: 'fast' | 'coarse' | 'balanced' | 'fine';
   floor: { boundary: 'ground' | 'outside' | 'adjacent'; temperatureC: number; layers: ThermalLayer[] };
   wallLayers?: ThermalLayer[]; roofLayers?: ThermalLayer[];
   environment: EnvironmentConfig; leakageACH: number; radiation: boolean;
@@ -44,7 +44,7 @@ export function sanitizeLayers(v: unknown, fallback: ThermalLayer[]): ThermalLay
 export function sanitizeModel(v: unknown): ModelConfig {
   const m = object(v), floor = object(m.floor), env = object(m.environment), d = DEFAULT_MODEL.environment;
   return {
-    quality: choice(m.quality, ['coarse', 'balanced', 'fine'], 'balanced'),
+    quality: choice(m.quality, ['fast', 'coarse', 'balanced', 'fine'], 'balanced'),
     floor: { boundary: choice(floor.boundary, ['ground', 'outside', 'adjacent'], 'ground'), temperatureC: number(floor.temperatureC, 10, -50, 60),
       layers: sanitizeLayers(floor.layers, DEFAULT_FLOOR_LAYERS) },
     ...(Array.isArray(m.wallLayers) ? { wallLayers: sanitizeLayers(m.wallLayers, []) } : {}),

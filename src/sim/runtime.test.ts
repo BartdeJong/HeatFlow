@@ -30,7 +30,7 @@ describe('worker engine and snapshot field', () => {
   it('matches the direct solver at identical timesteps, including field sampling', () => {
     const worker = engine(), direct = new Simulation(room(), { ...DEFAULT_PHYSICS, uScale: 0 });
     worker.advance(2, Infinity);
-    for (let i = 0; i < 8; i++) direct.advance(.25);
+    while (direct.elapsed < 2 - 1e-9) direct.advance(Math.min(1, 2 - direct.elapsed), 1);
     const snapshot = worker.snapshot()!;
     expect(snapshot.elapsed).toBe(2);
     expect([...snapshot.T]).toEqual([...direct.T]);
@@ -58,6 +58,51 @@ describe('worker engine and snapshot field', () => {
     worker.handle({ type: 'configure', room: changed, generation: 1, revision: 3 });
     expect(new Map(worker.snapshot()!.history.series).has('p1')).toBe(false);
   });
+  it('only scans statistics when recording and leaves full diagnostics to publication', () => {
+    const sim = new Simulation(room(), { ...DEFAULT_PHYSICS, uScale: 0 });
+    const stats = vi.spyOn(sim, 'stats'), diagnostics = vi.spyOn(sim, 'diagnostics');
+    const worker = new WorkerEngine(() => 0, () => sim);
+    worker.handle({ type: 'init', room: room(), generation: 1, revision: 1 });
+    worker.advance(12, Infinity);
+    // This scenario disables convection and leakage, so step() also calls stats once
+    // per physics step for the thermostat; recording adds just three scans (0, 5, 10).
+    const steps = vi.spyOn(sim, 'advance');
+    stats.mockClear();
+    worker.advance(2, Infinity);
+    expect(stats).toHaveBeenCalledTimes(steps.mock.calls.length);
+    expect(diagnostics).not.toHaveBeenCalled();
+    expect(worker.snapshot()!.history.times).toEqual([0, 5, 10]);
+    expect(diagnostics).toHaveBeenCalledTimes(1);
+  });
+  it('retains bounded scheduling deficits and clears them on pause and speed changes', () => {
+    let wall = 0;
+    const sim = new Simulation(room(), { ...DEFAULT_PHYSICS, uScale: 0 });
+    const advance = sim.advance.bind(sim);
+    vi.spyOn(sim, 'advance').mockImplementation((seconds, maxSteps) => {
+      wall += 10;
+      return advance(seconds, maxSteps);
+    });
+    const worker = new WorkerEngine(() => wall, () => sim);
+    worker.handle({ type: 'init', room: room(), generation: 1, revision: 1 });
+    worker.handle({ type: 'control', running: true, speed: 300 });
+    worker.runChunk(.01, 10);
+    const partial = sim.elapsed;
+    expect(partial).toBeGreaterThan(0); expect(partial).toBeLessThan(3);
+    worker.runChunk(0, Infinity);
+    expect(sim.elapsed).toBe(3);
+    worker.runChunk(10, 10);
+    const beforeCatchup = sim.elapsed;
+    worker.runChunk(0, Infinity);
+    expect(sim.elapsed).toBeCloseTo(33, 8); // Suspension contributes at most 100ms × 300.
+    expect(sim.elapsed).toBeGreaterThan(beforeCatchup);
+    worker.runChunk(.01, 10);
+    worker.handle({ type: 'control', running: false, speed: 300 });
+    const paused = sim.elapsed;
+    worker.runChunk(.1, Infinity);
+    worker.handle({ type: 'control', running: true, speed: 1 });
+    worker.runChunk(0, Infinity);
+    expect(sim.elapsed).toBe(paused);
+  });
   it('pauses, resets histories, and applies live edits without restarting time', () => {
     const worker = engine();
     worker.runChunk(.1, Infinity);
@@ -83,9 +128,8 @@ describe('worker engine and snapshot field', () => {
     const worker = new WorkerEngine(() => 0, r => {
       const sim = new Simulation(r, { ...DEFAULT_PHYSICS, uScale: 0 });
       if (r.outsideC === 0) {
-        const diagnostics = sim.diagnostics.bind(sim);
         vi.spyOn(sim, 'advance').mockReturnValue(0);
-        vi.spyOn(sim, 'diagnostics').mockImplementation(() => ({ ...diagnostics(), failure: 'Blocked ventilation path' }));
+        vi.spyOn(sim, 'failure', 'get').mockReturnValue('Blocked ventilation path');
       }
       return sim;
     });

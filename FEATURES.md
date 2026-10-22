@@ -33,7 +33,8 @@ Legend: ✅ implemented · ⬜ future work or unverified acceptance
 - ✅ Main-thread rendering with a module-worker solver and transferable field snapshots
 - ✅ Stable display field identity; generation/revision rejection of stale snapshots
 - ✅ Worker-side histories sampled in simulated time and achieved-speed reporting
-- ✅ Coarse/Balanced/Fine 24/32/48-cell quality with reset on quality changes
+- ✅ Fast/Coarse/Balanced/Fine 8/24/32/48-cell quality; Fast defaults new rooms to accelerated runs, with reset on quality changes
+- ✅ Cached direct pressure solve in unobstructed rooms and bounded worker pacing with per-step budget checks
 - ✅ Simple presets and an Advanced physics panel for construction/environment/sensor/emitter inputs
 - ✅ Local named saves and v6 sharing, with v1–v5 compatibility readers
 - ✅ Heating/cooling consumption, surface temperatures, component losses and energy diagnostics

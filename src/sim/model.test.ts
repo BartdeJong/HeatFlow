@@ -4,11 +4,17 @@ import { DEFAULT_MODEL, emitterPreset, floorLayers, getModel, roofLayers, saniti
 
 describe('physical model configuration and migration', () => {
   it('uses physical air properties and explicit storage for new rooms', () => {
+    expect(getModel(DEFAULT_ROOM).quality).toBe('fast');
     expect(DEFAULT_PHYSICS.massFactor).toBe(1);
     expect(DEFAULT_PHYSICS.alpha).toBeCloseTo(2.2e-5, 8);
     expect(getModel(DEFAULT_ROOM).floor).toMatchObject({ boundary: 'ground', temperatureC: 10 });
     expect(DEFAULT_ROOM.thermostat.sensor).toMatchObject({ mode: 'point', z: 1.1, lagSeconds: 30 });
     expect(DEFAULT_ROOM.sources[0].emitter?.kind).toBe('radiator');
+  });
+  it('preserves Fast and detailed resolution choices through sanitization', () => {
+    for (const quality of ['fast', 'coarse', 'balanced', 'fine'] as const) {
+      expect(sanitizeModel({ ...DEFAULT_MODEL, quality }).quality).toBe(quality);
+    }
   });
   it('preserves imported boundary, sensor and source intent', () => {
     const room = coerceRoom({ ...DEFAULT_ROOM, model: undefined, thermostat: { enabled: true, targetC: 20, deadbandC: 0.5 },

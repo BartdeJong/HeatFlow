@@ -32,6 +32,15 @@ describe('staggered momentum and residual pressure projection', () => {
     expect(flow.w[g.wIndex(4, 3, 1)]).toBeGreaterThan(0);
     expect(flow.w.some((q) => q < 0)).toBe(true);
   });
+  it('directly projects a non-power-of-two anisotropic box to roundoff precision', () => {
+    const g = new GridGeometry({ ...DEFAULT_ROOM, widthM: 7, heightM: 3, ceilingM: 2 }, 11, 7, 5), flow = new FlowSolver(g);
+    [flow.u, flow.v, flow.w].forEach((q, a) => { for (let f = 0; f < q.length; f++) q[f] = Math.sin(f * 3.7 + a); });
+    const result = flow.project(.17);
+    expect(result.converged).toBe(true);
+    expect(result.iterations).toBe(1);
+    expect(result.residual).toBeLessThan(1e-12);
+    expect(result.maxDivergence).toBeLessThan(1e-10);
+  });
   it('solves disconnected air pockets with independent pressure gauges', () => {
     const furniture: Furniture = { id: 1, kind: 'cabinet', material: 'wood', x: 2.5, y: 2, widthM: 1, depthM: 4, heightM: 2.5, rotation: 0 };
     const g = new GridGeometry({ ...DEFAULT_ROOM, furniture: [furniture] }, 10, 6, 5), flow = new FlowSolver(g);
