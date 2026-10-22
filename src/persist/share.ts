@@ -14,43 +14,18 @@ import {
   type RoomConfig,
 } from '../sim/config';
 
-const VERSION = 5;
+const VERSION = 6;
+const VERSION5 = 5;
 
-const r = (v: number, d = 3) => Number(v.toFixed(d));
 const isNum = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
 const allNums = (a: unknown[]) => a.every(isNum);
 
-/** Encode a room as a compact URL-safe string. */
+/** Full, UTF-8 configuration payload. Old compact v1–v5 links remain readable. */
 export function encodeRoom(room: RoomConfig): string {
-  const arr = [
-    VERSION,
-    r(room.widthM),
-    r(room.heightM),
-    room.convection ? 1 : 0,
-    WALL_MATERIALS.findIndex((m) => m.id === room.wall.material),
-    r(room.wall.thicknessM),
-    INSULATIONS.findIndex((m) => m.id === room.wall.insulation),
-    r(room.wall.insulationM),
-    room.sources.map((s) => [SOURCE_KINDS.indexOf(s.kind), r(s.x), r(s.y), r(s.z), r(s.powerKW)]),
-    room.openings.map((o) => [
-      OPENING_KINDS.indexOf(o.kind),
-      SIDES.findIndex((s) => s.id === o.side),
-      r(o.pos),
-      r(o.length),
-      o.open ? 1 : 0,
-      r(o.heightM),
-      r(o.sillM),
-    ]),
-    room.probes.map((p) => [r(p.x), r(p.y), r(p.z)]),
-    r(room.ceilingM),
-    r(room.outsideC),
-    room.furniture.map((f) => [FURNITURE_PRESETS.findIndex((p) => p.id === f.kind), FURNITURE_MATERIALS.findIndex((m) => m.id === f.material),
-      r(f.x), r(f.y), r(f.widthM), r(f.depthM), r(f.heightM), f.rotation]),
-    r(room.roof.pitchDeg), r(room.roof.insulationM), ROOF_MATERIALS.findIndex((m) => m.id === room.roof.material),
-    room.thermostat.enabled ? 1 : 0, r(room.thermostat.targetC), r(room.thermostat.deadbandC), room.heatingMode === 'underfloor' ? 1 : 0,
-  ];
-  const b64 = btoa(JSON.stringify(arr));
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const bytes = new TextEncoder().encode(JSON.stringify([VERSION, sanitizeRoom(room)]));
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 function rows(v: unknown, width: number): number[][] | null {
@@ -67,16 +42,30 @@ function rows(v: unknown, width: number): number[][] | null {
 export function decodeRoom(code: string): RoomConfig | null {
   try {
     const b64 = code.replace(/-/g, '+').replace(/_/g, '/');
-    const arr: unknown = JSON.parse(atob(b64));
+    if (code.length > 100_000) return null;
+    const binary = atob(b64);
+    const arr: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(binary, (c) => c.charCodeAt(0))));
     if (!Array.isArray(arr)) return null;
 
+    if (arr[0] === VERSION) {
+      if (arr.length !== 2 || !arr[1] || typeof arr[1] !== 'object' || Array.isArray(arr[1])) return null;
+      const c = arr[1] as Record<string, unknown>;
+      if (!isNum(c.widthM) || !isNum(c.heightM) || !Array.isArray(c.sources) ||
+        !Array.isArray(c.openings) || !Array.isArray(c.probes) || !Array.isArray(c.furniture)) return null;
+      const fields = [[c.sources, ['x', 'y', 'z', 'powerKW']], [c.probes, ['x', 'y', 'z']],
+        [c.openings, ['pos', 'length', 'heightM', 'sillM']], [c.furniture, ['x', 'y', 'widthM', 'depthM', 'heightM']]] as const;
+      for (const [items, required] of fields) for (const item of items) {
+        if (!item || typeof item !== 'object' || required.some((key) => !isNum(item[key]))) return null;
+      }
+      return sanitizeRoom(c as unknown as RoomConfig);
+    }
     if (arr[0] === 1) {
       if (arr.length !== 7 || !allNums(arr)) return null;
       const [, w, h, p, u, sx, sy] = arr as number[];
       return legacyRoom(w, h, p, u, sx, sy);
     }
 
-    const current = arr[0] === VERSION;
+    const current = arr[0] === VERSION5;
     const furnished = current || arr[0] === 4;
     const volumetric = furnished || arr[0] === 3;
     if ((!volumetric && arr[0] !== 2) || arr.length < 11 || arr.length > (current || arr[0] === 2 ? 21 : furnished ? 14 : 13)) return null;

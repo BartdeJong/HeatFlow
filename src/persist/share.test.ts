@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_ROOM, coerceRoom, sanitizeRoom, wallU, type RoomConfig } from '../sim/config';
 import { decodeRoom, encodeRoom, roomFromHash, shareUrl } from './share';
+import { DEFAULT_MODEL, getModel } from '../sim/model';
 
 const full: RoomConfig = {
   widthM: 6.5,
@@ -23,6 +24,16 @@ const full: RoomConfig = {
   probes: [{ id: 1, x: 2, y: 1, z: 1.7 }],
   furniture: [{ id: 1, kind: 'table', material: 'wood', x: 3, y: 1.5, widthM: 1.4, depthM: 0.9, heightM: 0.8, rotation: 90 }],
 };
+
+// Fixed legacy payload: never manufacture old links with the current encoder.
+function v5(): unknown[] {
+  return [5, 6.5, 3.2, 1, 2, 0.15, 2, 0.08,
+    [[0, 1.2, 3, 0.4, 2.4], [1, 5, 1, 2.8, 0.8]],
+    [[0, 0, 3, 1.5, 1, 1.2, 0.8], [1, 3, 1.6, 0.9, 0, 2.1, 0]],
+    [[2, 1, 1.7]], 3.4, -7, [[1, 0, 3, 1.5, 1.4, 0.9, 0.8, 90]],
+    48, 0.22, 1, 1, 21.5, 0.8, 1];
+}
+const legacyThermostat = { enabled: false, targetC: 20, deadbandC: 0.5 };
 
 describe('share', () => {
   it('round-trips a full room', () => {
@@ -52,7 +63,7 @@ describe('share', () => {
   it('loads older v2 links with default thermostat and furniture', () => {
     const code = btoa(JSON.stringify([2, 5, 4, 0, 0, 0.2, 0, 0, [], [], []]));
     const room = decodeRoom(code)!;
-    expect(room.thermostat).toEqual(DEFAULT_ROOM.thermostat);
+    expect(room.thermostat).toEqual(legacyThermostat);
     expect(room.furniture).toEqual(DEFAULT_ROOM.furniture);
     expect(room.heatingMode).toBe('point');
   });
@@ -90,14 +101,14 @@ describe('share', () => {
   });
 
   it('loads version 4 furniture links with default roof and thermostat settings', () => {
-    const arr = JSON.parse(atob(encodeRoom(full)));
+    const arr = v5();
     arr[0] = 4;
     arr.length = 14;
     const loaded = decodeRoom(btoa(JSON.stringify(arr)))!;
     expect(loaded.furniture).toEqual(full.furniture);
     expect(loaded.sources).toEqual(full.sources);
     expect(loaded.roof).toEqual(DEFAULT_ROOM.roof);
-    expect(loaded.thermostat).toEqual(DEFAULT_ROOM.thermostat);
+    expect(loaded.thermostat).toEqual(legacyThermostat);
     expect(loaded.heatingMode).toBe('point');
   });
 
@@ -120,13 +131,13 @@ describe('share', () => {
   });
 
   it('rejects malformed furniture rows', () => {
-    const arr = JSON.parse(atob(encodeRoom(full).replace(/-/g, '+').replace(/_/g, '/')));
+    const arr = v5() as any[];
     arr[13][0].pop();
     expect(decodeRoom(btoa(JSON.stringify(arr)))).toBeNull();
   });
 
   it('rejects incomplete 3D coordinates instead of guessing their format', () => {
-    const arr = JSON.parse(atob(encodeRoom(full).replace(/-/g, '+').replace(/_/g, '/')));
+    const arr = v5() as any[];
     arr[8][0].pop();
     expect(decodeRoom(btoa(JSON.stringify(arr)))).toBeNull();
   });
@@ -150,6 +161,32 @@ describe('share', () => {
     expect(room.sources[0].kind).toBe('heat');
     expect(room.openings[0].side).toBe('top');
     expect(room.probes[0].x).toBe(10);
+  });
+
+
+  it('keeps v5 links with their legacy boundary and ideal source intent', () => {
+    const room = decodeRoom(btoa(JSON.stringify(v5())))!;
+    expect(room).toEqual(full);
+    expect(getModel(room).floor.boundary).toBe('outside');
+    expect(getModel(room).leakageACH).toBe(0);
+    expect(room.sources[0].emitter).toBeUndefined();
+    expect(room.thermostat.sensor).toBeUndefined();
+  });
+
+  it('round-trips v6 construction, Unicode labels, sensors, solar and emitter data', () => {
+    const room = sanitizeRoom({ ...full, model: { ...structuredClone(DEFAULT_MODEL), floor: {
+      boundary: 'adjacent', temperatureC: 18, layers: [{ label: 'Béton ☀', thicknessM: 0.15, k: 1.7, density: 2300, cp: 880 }] } },
+      thermostat: { ...full.thermostat, sensor: { mode: 'point', x: 1, y: 2, z: 1.1, lagSeconds: 30 } },
+      sources: DEFAULT_ROOM.sources, openings: [{ ...full.openings[0], solarTransmittance: 0.45 }] });
+    const code = encodeRoom(room);
+    expect(code).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(decodeRoom(code)).toEqual(room);
+  });
+
+  it('rejects malformed v6 fields and unsupported versions', () => {
+    expect(decodeRoom(btoa(JSON.stringify([6, { widthM: 5, heightM: 4, sources: [] }])))).toBeNull();
+    expect(decodeRoom(btoa(JSON.stringify([7, full])))).toBeNull();
+    expect(decodeRoom(btoa(JSON.stringify([6, { ...full, sources: [{ x: 1 }] }])))).toBeNull();
   });
 
   it('builds and parses share URLs', () => {
