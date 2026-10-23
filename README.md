@@ -29,6 +29,8 @@ The model is intended for exploring room behavior. Humidity, condensation, porou
 
 ## Controls and runtime
 
+The workspace keeps playback, speed and live readings above the room. The inspector groups controls into **Setup** (room and objects), **Climate** (thermostat, weather and construction), **Display**, and **Results** (energy, probes and diagnostics). Selecting a room object reveals its controls. Use the header’s **Save & Share** menu for named local saves and share links. On smaller screens, the inspector sits below the visualization.
+
 - Drag empty space to rotate; scroll or use **＋ / −** to zoom; **↺** resets the camera. Volume rendering uses WebGL2, with a projected Canvas2D fallback. X/Y/Z slices, probes, temperature clouds and airflow trails remain available.
 - Drag sources/probes horizontally; **Shift-drag** changes height. Arrow keys move X/Y, **Page Up / Page Down** moves Z, and **Shift** increases the step. Sidebar coordinates allow precise placement.
 - Add/select furniture to change dimensions, material or rotation. Drag it or its handle to move it; **R** rotates a focused handle. Furniture and room geometry changes restart the run.

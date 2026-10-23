@@ -18,3 +18,32 @@ body,
 *::after {
   box-sizing: border-box;
 }
+
+:root {
+  --background:#11151c; --surface:#191e27; --surface-raised:#222936;
+  --border:#303947; --text:#e9edf3; --muted:#a0adbf; --accent:#ff9a57;
+  background:var(--background); color:var(--text); font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;
+  font-synthesis:none; -webkit-font-smoothing:antialiased;
+}
+button,select,input { font:inherit; color:inherit; }
+button,select,input[type='text'],input[type='number'] { padding:9px 11px; min-height:38px; min-width:0; max-width:100%; border:1px solid var(--border); border-radius:8px; background:var(--surface-raised); }
+button,summary,select { cursor:pointer; }
+button:hover:not(:disabled) { background:#303b4b; }
+button:disabled { opacity:.45; cursor:default; }
+button.primary { background:var(--accent); border-color:var(--accent); color:#21160e; font-weight:650; }
+button.primary:hover:not(:disabled) { background:#ffb37f; }
+:focus-visible { outline:2px solid #94caff; outline-offset:3px; }
+fieldset { min-width:0; margin:0; padding:16px; border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; gap:12px; }
+legend { padding:0 6px; color:var(--muted); font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+label { display:flex; flex-direction:column; gap:6px; font-size:13px; }
+label > span:first-child { display:flex; justify-content:space-between; gap:8px; }
+output { color:var(--accent); font-variant-numeric:tabular-nums; }
+input[type='range'] { width:100%; min-height:28px; accent-color:var(--accent); }
+input[type='checkbox'] { accent-color:var(--accent); }
+.hint { margin:0; color:var(--muted); font-size:12px; line-height:1.55; }
+.row { display:flex; gap:8px; } .row > input[type='text'],.row > select { flex:1; min-width:0; }
+.status { color:#9bdab6; min-height:1.2em; }
+summary { line-height:1.5; }
+* { scrollbar-width:thin; scrollbar-color:#465166 transparent; }
+@media(max-width:899px) { html,body,#app { height:auto; min-height:100%; overflow:visible; } .sidebar { max-height:75dvh; min-height:400px; } }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }

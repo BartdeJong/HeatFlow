@@ -1,11 +1,10 @@
 <script lang="ts">
-  import { app, updateModel, updateSource, updateThermostat, updateOpening, furnitureWarnings } from '../state/app.svelte';
+  import { app, updateModel, updateSource, updateThermostat } from '../state/app.svelte';
   import { DEFAULT_FLOOR_LAYERS, emitterPreset, floorLayers, getModel, roofLayers, wallLayers, type EmitterConfig, type EnvironmentConfig, type ModelConfig, type SensorConfig, type ThermalLayer } from '../sim/model';
+  let { section = 'config' }: { section?: 'config' | 'emitter' | 'diagnostics' } = $props();
   const model = $derived(getModel(app.room));
   const source = $derived(app.selection?.kind === 'source' ? app.room.sources.find((s) => s.id === app.selection!.id) : undefined);
-  const opening = $derived(app.selection?.kind === 'opening' ? app.room.openings.find((o) => o.id === app.selection!.id) : undefined);
   const sensor = $derived(app.room.thermostat.sensor ?? { mode: 'average' as const, x: app.room.widthM / 2, y: app.room.heightM / 2, z: 1.1, lagSeconds: 0 });
-  const warnings = $derived(furnitureWarnings(app.room));
   function environment(patch: Partial<EnvironmentConfig>) { updateModel({ environment: { ...model.environment, ...patch } }); }
   function sensing(patch: Partial<SensorConfig>) { updateThermostat({ sensor: { ...sensor, ...patch } }); }
   function layerList(kind: 'wall' | 'roof' | 'floor'): ThermalLayer[] {
@@ -29,7 +28,8 @@
 </script>
 
 <fieldset>
-  <legend>Physical model</legend>
+  <legend>{section === 'config' ? 'Physical model' : section === 'emitter' ? 'Emitter' : 'Diagnostics'}</legend>
+  {#if section === 'config'}
   <label>Resolution
     <select value={model.quality} onchange={(e) => updateModel({ quality: e.currentTarget.value as ModelConfig['quality'] })}>
       <option value="coarse">Coarse · 24 cells</option><option value="balanced">Balanced · 32 cells</option><option value="fine">Fine · 48 cells</option>
@@ -47,7 +47,6 @@
   </label>
   <label class="check"><input type="checkbox" checked={model.radiation} onchange={(e) => updateModel({ radiation: e.currentTarget.checked })} />Surface thermal radiation</label>
   <p class="hint">Surfaces and furniture store heat. Floor heating warms the slab before the room. Daily presets repeat deterministically; they are synthetic weather.</p>
-  {#if app.placementMessage || warnings.length}<p class="warning" role="status">{app.placementMessage || warnings.join(' ')}</p>{/if}
   <details>
     <summary>Advanced physics</summary>
     <div class="controls">
@@ -102,7 +101,8 @@
       <p class="hint">Custom wall/ceiling layers override the material sliders. The illustrated pitched roof sits above the ceiling; no attic air is simulated. Resolution changes restart the simulation.</p>
     </div>
   </details>
-  {#if source?.kind === 'heat'}
+  {/if}
+  {#if section === 'emitter' && source?.kind === 'heat'}
     <details open>
       <summary>Emitter · source {source.id}</summary>
       <div class="controls">
@@ -121,11 +121,7 @@
       </div>
     </details>
   {/if}
-  {#if opening?.kind === 'window'}
-    <label>Window solar transmittance<input type="number" min="0" max="1" step="0.05" value={opening.solarTransmittance ?? 0.6} onchange={(e) => updateOpening(opening.id, { solarTransmittance: e.currentTarget.valueAsNumber })} /></label>
-  {/if}
-
-  {#if app.stats.diagnostics.failure}<p class="warning" role="alert">Simulation paused: {app.stats.diagnostics.failure}</p>{/if}
+  {#if section === 'diagnostics'}
   <dl class="readings">
     <dt>Thermostat sensor</dt><dd>{app.stats.diagnostics.sensorC.toFixed(1)} °C</dd>
     <dt>Stored heat (0 °C reference)</dt><dd>{(app.stats.diagnostics.storedEnergyJ / 3_600_000).toFixed(2)} kWh</dd>
@@ -147,20 +143,18 @@
     <p class="hint">Stored energy uses a fixed 0 °C reference, including air, construction, furniture and emitters.</p>
   </details>
   <p class="hint">Older links retain their room settings. Predictions change with the new physics. Browser airflow is an approximation; compare resolutions for your room.</p>
+  {/if}
 </fieldset>
 
 <style>
-  fieldset { margin: 0; padding: 10px 12px 12px; border: 1px solid #343845; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
-  legend { padding: 0 6px; color: #9aa3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-  input, select, button { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid #3d4254; background: #262a35; color: inherit; min-width: 0; max-width: 100%; box-sizing: border-box; }
-  button, select { min-height: 36px; } button, summary { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+
+ button, summary { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
   .check { flex-direction: row; gap: 8px; align-items: center; }
   .controls { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
-  .hint { color: #929bb1; font-size: 12px; margin: 0; }
+
   .readings { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; font-size: 12px; margin: 6px 0; }
-  .readings dt { color: #9aa3b8; } .readings dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-  .warning { color: #ffbe83; font-size: 12px; margin: 0; }
+  .readings dt { color: var(--muted); } .readings dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
   summary { font-size: 13px; color: #bcc7dd; } .layers { border-top: 1px solid #343845; padding-top: 10px; }
   .layer { display: flex; flex-direction: column; gap: 6px; padding: 8px; margin: 8px 0; background: #222630; border-radius: 5px; }
 </style>

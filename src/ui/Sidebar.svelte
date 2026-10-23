@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import {
     addOpening,
     addProbe,
@@ -8,10 +9,7 @@
     removeOpening,
     removeProbe,
     removeSource,
-    resetSimulation,
     select,
-    setRoom,
-    SPEEDS,
     updateOpening,
     updateRoom,
     updateRoof,
@@ -35,17 +33,11 @@
     type WallMaterialId,
     type WallSide,
   } from '../sim/config';
-  import { PALETTES, PALETTE_IDS, paletteCssGradient, type PaletteId } from '../render/palette';
+  import { PALETTES, PALETTE_IDS } from '../render/palette';
   import Graph from './Graph.svelte';
   import FurniturePanel from './FurniturePanel.svelte';
   import PhysicsPanel from './PhysicsPanel.svelte';
-  import { deleteRoom, listSavedRooms, saveRoom } from '../persist/storage';
-  import { shareUrl } from '../persist/share';
 
-  let saved = $state(listSavedRooms());
-  let name = $state('My room');
-  let selected = $state('');
-  let message = $state('');
   let holdMsg = $state('');
 
   function holdSource(id: number) {
@@ -57,7 +49,6 @@
       : `20 °C can't be reached with this source (limit ${res.kW.toFixed(2)} kW).`;
     setTimeout(() => (holdMsg = ''), 4000);
   }
-  const names = $derived(Object.keys(saved).sort());
   const wallUValue = $derived(wallU(app.room.wall));
   const roofUValue = $derived(roofU(app.room.roof));
   const selectedSource = $derived(
@@ -69,60 +60,36 @@
   const selectedProbe = $derived(app.selection?.kind === 'probe' ? app.room.probes.find((p) => p.id === app.selection!.id) : undefined);
   const sliceLength = $derived(app.sliceAxis === 'x' ? app.room.widthM : app.sliceAxis === 'y' ? app.room.heightM : app.room.ceilingM);
 
-  function flash(text: string) {
-    message = text;
-    setTimeout(() => {
-      if (message === text) message = '';
-    }, 3000);
+  const tabs = ['Setup', 'Climate', 'Display', 'Results'] as const;
+  let active = $state<(typeof tabs)[number]>('Setup');
+  $effect(() => {
+    const selection = app.selection;
+    if (!selection) return;
+    const tab = selection.kind === 'probe' ? 'Results' : 'Setup';
+    active = tab;
+    let cancelled = false;
+    void tick().then(() => {
+      if (cancelled) return;
+      const panel = document.getElementById(`panel-${tab}`);
+      const target = document.getElementById(`inspect-${selection.kind}`);
+      if (panel && target && !panel.hidden) {
+        panel.scrollTop += target.getBoundingClientRect().top - panel.getBoundingClientRect().top - 20;
+      }
+    });
+    return () => { cancelled = true; };
+  });
+  function tabKey(event: KeyboardEvent, index: number) {
+    const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    if (!delta && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + delta + tabs.length) % tabs.length;
+    active = tabs[next];
+    document.getElementById(`tab-${active}`)?.focus();
   }
-
-  function onSave() {
-    const n = name.trim();
-    if (!n) return flash('Enter a name first.');
-    if (!saveRoom(n, $state.snapshot(app.room))) return flash('Could not save (storage unavailable).');
-    saved = listSavedRooms();
-    selected = n;
-    flash(`Saved “${n}”.`);
-  }
-
-  function onLoad() {
-    const room = saved[selected];
-    if (!room) return;
-    setRoom(room);
-    name = selected;
-    flash(`Loaded “${selected}”.`);
-  }
-
-  function onDelete() {
-    if (!selected) return;
-    deleteRoom(selected);
-    saved = listSavedRooms();
-    selected = '';
-  }
-
-  async function onShare() {
-    const url = shareUrl($state.snapshot(app.room));
-    history.replaceState(null, '', url);
-    try {
-      await navigator.clipboard.writeText(url);
-      flash('Link copied to clipboard.');
-    } catch {
-      flash('Link placed in the address bar.');
-    }
-  }
-
-  function fmtTime(s: number): string {
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = Math.floor(s % 60);
-    return h > 0 ? `${h} h ${m} min` : `${m} min ${sec.toString().padStart(2, '0')} s`;
-  }
-
   function fmtPower(w: number): string {
     return Math.abs(w) >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${w.toFixed(0)} W`;
   }
 </script>
-
 {#snippet positionControls(item: { id: number; x: number; y: number; z: number }, kind: 'source' | 'probe')}
   {#each [{ key: 'x' as const, label: 'X · width', max: app.room.widthM }, { key: 'y' as const, label: 'Y · length', max: app.room.heightM }, { key: 'z' as const, label: 'Z · height above floor', max: app.room.ceilingM }] as axis}
     <label>
@@ -133,35 +100,182 @@
   {/each}
 {/snippet}
 
-<aside class="sidebar">
-  <h1>🔥 HeatFlow <span class="tag">3D</span></h1>
-
+<aside class="sidebar" aria-label="Room inspector">
+<div class="inspector-heading"><span>ROOM INSPECTOR</span><span class="inspector-badge">3D</span></div>
+<div class="tabs" role="tablist" aria-label="Settings sections">
+{#each tabs as tab, index}<button id="tab-{tab}" role="tab" aria-selected={active === tab} aria-controls="panel-{tab}" tabindex={active === tab ? 0 : -1} onclick={() => active = tab} onkeydown={(e) => tabKey(e, index)}>{tab}</button>{/each}
+</div>
+<div class="inspector-content" id="panel-Setup" role="tabpanel" aria-labelledby="tab-Setup" tabindex="0" hidden={active !== 'Setup'}>
   <fieldset>
-    <legend>Simulation</legend>
-    <div class="row">
-      <button class="primary" onclick={() => (app.running = !app.running)}>
-        {app.running ? '⏸ Pause' : '▶ Play'}
-      </button>
-      <button onclick={resetSimulation}>↺ Reset</button>
-    </div>
+    <legend>Room</legend>
     <label>
-      Speed
-      <select bind:value={app.speed}>
-        {#each SPEEDS as s}
-          <option value={s}>{s === 1 ? 'Real time (1×)' : `${s}× real time`}</option>
-        {/each}
+      <span>Width <output>{app.room.widthM.toFixed(1)} m</output></span>
+      <input
+        type="range"
+        min={LIMITS.size.min}
+        max={LIMITS.size.max}
+        step={LIMITS.size.step}
+        value={app.room.widthM}
+        oninput={(e) => updateRoom({ widthM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Length <output>{app.room.heightM.toFixed(1)} m</output></span>
+      <input
+        type="range"
+        min={LIMITS.size.min}
+        max={LIMITS.size.max}
+        step={LIMITS.size.step}
+        value={app.room.heightM}
+        oninput={(e) => updateRoom({ heightM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Ceiling height <output>{app.room.ceilingM.toFixed(1)} m</output></span>
+      <input
+        type="range"
+        min={LIMITS.size.min}
+        max={LIMITS.size.max}
+        step={LIMITS.size.step}
+        value={app.room.ceilingM}
+        oninput={(e) => updateRoom({ ceilingM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+
+    <p class="hint">The room uses X for width, Y for length, and Z for height. Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
+  </fieldset>
+  <fieldset id="inspect-source">
+    <legend>Sources</legend>
+    <label>
+      Heating delivery
+      <select
+        value={app.room.heatingMode}
+        onchange={(e) => updateRoom({ heatingMode: e.currentTarget.value as HeatingMode })}
+      >
+        <option value="point">Individual emitters</option>
+        <option value="underfloor">Underfloor heating</option>
       </select>
     </label>
-    <dl class="stats">
-      <dt>Elapsed</dt><dd>{fmtTime(app.stats.elapsed)}</dd>
-      <dt>Achieved speed</dt><dd>{app.stats.achievedSpeed.toFixed(1)}× of {app.speed}× requested</dd>
-      <dt>Air average</dt><dd>{app.stats.mean.toFixed(1)} °C</dd>
-      <dt>Hottest air</dt><dd>{app.stats.max.toFixed(1)} °C</dd>
-    </dl>
+    {#if app.room.heatingMode === 'underfloor'}
+      <p class="hint">Heat sources warm the floor slab; their position is ignored. The slab releases stored heat after switch-off. Cold sources remain point-based.</p>
+    {/if}
+    <div class="row">
+      <button onclick={() => addSource('heat')} disabled={app.room.sources.length >= LIMITS.sources}>
+        + Heat
+      </button>
+      <button onclick={() => addSource('cold')} disabled={app.room.sources.length >= LIMITS.sources}>
+        + Cold
+      </button>
+    </div>
+    <ul class="items">
+      {#each app.room.sources as s (s.id)}
+        <li class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}>
+          <button class="item" onclick={() => select({ kind: 'source', id: s.id })}>
+            <span class="dot {s.kind}"></span>
+            {s.kind === 'cold' ? 'Cold' : app.room.heatingMode === 'underfloor' ? 'Underfloor' : 'Heat'} {s.id} · {s.powerKW.toFixed(1)} kW
+          </button>
+          <button onclick={() => removeSource(s.id)} aria-label="Remove source {s.id}">×</button>
+        </li>
+      {/each}
+    </ul>
+    {#if selectedSource}
+      <label>
+        <span>
+          {selectedSource.kind === 'heat' ? 'Output' : 'Cooling'}
+          <output>{selectedSource.powerKW.toFixed(1)} kW</output>
+        </span>
+        <input
+          type="range"
+          min={LIMITS.power.min}
+          max={LIMITS.power.max}
+          step={LIMITS.power.step}
+          value={selectedSource.powerKW}
+          oninput={(e) => updateSource(selectedSource.id, { powerKW: e.currentTarget.valueAsNumber })}
+        />
+      </label>
+      {@render positionControls(selectedSource, 'source')}
+      <button onclick={() => holdSource(selectedSource.id)}>↗ Estimate power for 20 °C</button>
+      {#if holdMsg}<p class="hint">{holdMsg}</p>{/if}
+      {#if selectedSource.kind === 'heat'}<PhysicsPanel section="emitter" />{/if}
+    {:else}
+      <p class="hint">Select a source to adjust its power and 3D position. Drag it to move; Shift-drag to change height.</p>
+    {/if}
   </fieldset>
-
-  <PhysicsPanel />
-
+<div id="inspect-furniture"><FurniturePanel /></div>
+  <fieldset id="inspect-opening">
+    <legend>Windows &amp; doors</legend>
+    <div class="row">
+      <button onclick={() => addOpening('window')} disabled={app.room.openings.length >= LIMITS.openings}>
+        + Window
+      </button>
+      <button onclick={() => addOpening('door')} disabled={app.room.openings.length >= LIMITS.openings}>
+        + Door
+      </button>
+    </div>
+    {#each app.room.openings as o (o.id)}
+      {@const len = wallLength(app.room, o.side)}
+      <div class="opening" class:sel={app.selection?.kind === 'opening' && app.selection.id === o.id}>
+        <div class="row">
+          <button class="item" onclick={() => select({ kind: 'opening', id: o.id })}>
+            {o.kind === 'window' ? 'Window' : 'Door'} {o.id}
+          </button>
+          <button
+            class:primary={o.open}
+            onclick={() => updateOpening(o.id, { open: !o.open })}
+            aria-pressed={o.open}
+          >
+            {o.open ? 'Open' : 'Closed'}
+          </button>
+          <button onclick={() => removeOpening(o.id)} aria-label="Remove opening {o.id}">×</button>
+        </div>
+        {#if o.kind === 'window'}<label>Solar transmittance<input type="number" min="0" max="1" step="0.05" value={o.solarTransmittance ?? 0.6} onchange={(e) => updateOpening(o.id, { solarTransmittance: e.currentTarget.valueAsNumber })} /></label>{/if}
+        <label>
+          Wall
+          <select
+            value={o.side}
+            onchange={(e) => updateOpening(o.id, { side: e.currentTarget.value as WallSide })}
+          >
+            {#each SIDES as s}<option value={s.id}>{s.label}</option>{/each}
+          </select>
+        </label>
+        <label>
+          <span>Position <output>{o.pos.toFixed(1)} m</output></span>
+          <input
+            type="range"
+            min="0"
+            max={len}
+            step="0.1"
+            value={o.pos}
+            oninput={(e) => updateOpening(o.id, { pos: e.currentTarget.valueAsNumber })}
+          />
+        </label>
+        <label>
+          <span>Opening height <output>{o.heightM.toFixed(1)} m</output></span>
+          <input type="range" min="0.3" max={app.room.ceilingM} step="0.1" value={o.heightM}
+            oninput={(e) => updateOpening(o.id, { heightM: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label>
+          <span>Sill above floor <output>{o.sillM.toFixed(1)} m</output></span>
+          <input type="range" min="0" max={app.room.ceilingM - o.heightM} step="0.1" value={o.sillM}
+            oninput={(e) => updateOpening(o.id, { sillM: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label>
+          <span>Width <output>{o.length.toFixed(1)} m</output></span>
+          <input
+            type="range"
+            min={LIMITS.openingLength.min}
+            max={Math.max(LIMITS.openingLength.min, len - 0.2)}
+            step={LIMITS.openingLength.step}
+            value={o.length}
+            oninput={(e) => updateOpening(o.id, { length: e.currentTarget.valueAsNumber })}
+          />
+        </label>
+      </div>
+    {/each}
+    <p class="hint">Windows and doors can sit in any vertical wall. Click one on the wall to open or close it. Open ones lose a lot of heat.</p>
+  </fieldset>
+</div>
+<div class="inspector-content" id="panel-Climate" role="tabpanel" aria-labelledby="tab-Climate" tabindex="0" hidden={active !== 'Climate'}>
   <fieldset>
     <legend>Thermostat</legend>
     <label class="check">
@@ -216,21 +330,103 @@
       When enabled, all heat sources run at their set power until the configured sensor reaches target + half the deadband, then pause until it falls below target − half the deadband. Cooling sources remain manual.
     </p>
   </fieldset>
-
+<fieldset><legend>Outdoor temperature</legend>    <label>
+      <span>Outside temperature <output>{app.room.outsideC.toFixed(0)} °C</output></span>
+      <input
+        type="range"
+        min={LIMITS.outside.min}
+        max={LIMITS.outside.max}
+        step={LIMITS.outside.step}
+        value={app.room.outsideC}
+        oninput={(e) => updateRoom({ outsideC: e.currentTarget.valueAsNumber })}
+      />
+    </label></fieldset>
+<PhysicsPanel />
   <fieldset>
-    <legend>Energy &amp; heat loss</legend>
-    <dl class="stats">
-      <dt>Heat delivered</dt><dd>{app.stats.heatingKWh.toFixed(3)} kWh</dd>
-      <dt>Cooling delivered</dt><dd>{app.stats.coolingKWh.toFixed(3)} kWh</dd>
-      <dt>Current heat loss</dt><dd>{fmtPower(app.stats.heatLoss.totalW)}</dd>
-      <dt>Roof</dt><dd>{fmtPower(app.stats.heatLoss.roofW)}</dd>
-      <dt>Walls</dt><dd>{fmtPower(app.stats.heatLoss.wallsW)}</dd>
-      <dt>Floor</dt><dd>{fmtPower(app.stats.heatLoss.floorW)}</dd>
-      <dt>Windows &amp; doors</dt><dd>{fmtPower(app.stats.heatLoss.openingsW)}</dd>
-    </dl>
-    <p class="hint">Positive heat loss leaves the room; negative values mean heat is entering from outside. Energy totals accumulate while the simulation runs and clear on reset.</p>
+    <legend>Walls</legend>
+    <label>
+      Material
+      <select
+        value={app.room.wall.material}
+        onchange={(e) => updateWall({ material: e.currentTarget.value as WallMaterialId })}
+      >
+        {#each WALL_MATERIALS as m}<option value={m.id}>{m.label}</option>{/each}
+      </select>
+    </label>
+    <label>
+      <span>Thickness <output>{(app.room.wall.thicknessM * 100).toFixed(0)} cm</output></span>
+      <input
+        type="range"
+        min={LIMITS.thickness.min}
+        max={LIMITS.thickness.max}
+        step={LIMITS.thickness.step}
+        value={app.room.wall.thicknessM}
+        oninput={(e) => updateWall({ thicknessM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      Insulation type
+      <select
+        value={app.room.wall.insulation}
+        onchange={(e) => updateWall({ insulation: e.currentTarget.value as InsulationId })}
+      >
+        {#each INSULATIONS as m}<option value={m.id}>{m.label}</option>{/each}
+      </select>
+    </label>
+    <label>
+      <span>
+        Insulation thickness <output>{(app.room.wall.insulationM * 100).toFixed(0)} cm</output>
+      </span>
+      <input
+        type="range"
+        min={LIMITS.insulation.min}
+        max={LIMITS.insulation.max}
+        step={LIMITS.insulation.step}
+        value={app.room.wall.insulationM}
+        oninput={(e) => updateWall({ insulationM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The floor has its own construction in Physical model.</p>
   </fieldset>
-
+  <fieldset>
+    <legend>Roof</legend>
+    <label>
+      Covering
+      <select
+        value={app.room.roof.material}
+        onchange={(e) => updateRoof({ material: e.currentTarget.value as RoofMaterialId })}
+      >
+        {#each ROOF_MATERIALS as m}<option value={m.id}>{m.label}</option>{/each}
+      </select>
+    </label>
+    <label>
+      <span>Pitch <output>{app.room.roof.pitchDeg.toFixed(0)}°</output></span>
+      <input
+        type="range"
+        min={LIMITS.pitch.min}
+        max={LIMITS.pitch.max}
+        step={LIMITS.pitch.step}
+        value={app.room.roof.pitchDeg}
+        oninput={(e) => updateRoof({ pitchDeg: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <label>
+      <span>Roof insulation <output>{(app.room.roof.insulationM * 100).toFixed(0)} cm</output></span>
+      <input
+        type="range"
+        min={LIMITS.roofInsulation.min}
+        max={LIMITS.roofInsulation.max}
+        step={LIMITS.roofInsulation.step}
+        value={app.room.roof.insulationM}
+        oninput={(e) => updateRoof({ insulationM: e.currentTarget.valueAsNumber })}
+      />
+    </label>
+    <p class="hint">
+      Roof U-value <output>{roofUValue.toFixed(2)} W/m²K</output>. The covering is visual only.
+    </p>
+  </fieldset>
+</div>
+<div class="inspector-content" id="panel-Display" role="tabpanel" aria-labelledby="tab-Display" tabindex="0" hidden={active !== 'Display'}>
   <fieldset>
     <legend>Display</legend>
     <label>
@@ -288,224 +484,22 @@
       <p class="hint">Heat clouds show the air temperature throughout the room. Enable convection to see rising plumes and airflow trails.</p>
     {/if}
   </fieldset>
-
+</div>
+<div class="inspector-content" id="panel-Results" role="tabpanel" aria-labelledby="tab-Results" tabindex="0" hidden={active !== 'Results'}>
   <fieldset>
-    <legend>Sources</legend>
-    <label>
-      Heating delivery
-      <select
-        value={app.room.heatingMode}
-        onchange={(e) => updateRoom({ heatingMode: e.currentTarget.value as HeatingMode })}
-      >
-        <option value="point">Individual emitters</option>
-        <option value="underfloor">Underfloor heating</option>
-      </select>
-    </label>
-    {#if app.room.heatingMode === 'underfloor'}
-      <p class="hint">Heat sources warm the floor slab; their position is ignored. The slab releases stored heat after switch-off. Cold sources remain point-based.</p>
-    {/if}
-    <div class="row">
-      <button onclick={() => addSource('heat')} disabled={app.room.sources.length >= LIMITS.sources}>
-        + Heat
-      </button>
-      <button onclick={() => addSource('cold')} disabled={app.room.sources.length >= LIMITS.sources}>
-        + Cold
-      </button>
-    </div>
-    <ul class="items">
-      {#each app.room.sources as s (s.id)}
-        <li class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}>
-          <button class="item" onclick={() => select({ kind: 'source', id: s.id })}>
-            <span class="dot {s.kind}"></span>
-            {s.kind === 'cold' ? 'Cold' : app.room.heatingMode === 'underfloor' ? 'Underfloor' : 'Heat'} {s.id} · {s.powerKW.toFixed(1)} kW
-          </button>
-          <button onclick={() => removeSource(s.id)} aria-label="Remove source {s.id}">🗑</button>
-        </li>
-      {/each}
-    </ul>
-    {#if selectedSource}
-      <label>
-        <span>
-          {selectedSource.kind === 'heat' ? 'Output' : 'Cooling'}
-          <output>{selectedSource.powerKW.toFixed(1)} kW</output>
-        </span>
-        <input
-          type="range"
-          min={LIMITS.power.min}
-          max={LIMITS.power.max}
-          step={LIMITS.power.step}
-          value={selectedSource.powerKW}
-          oninput={(e) => updateSource(selectedSource.id, { powerKW: e.currentTarget.valueAsNumber })}
-        />
-      </label>
-      {@render positionControls(selectedSource, 'source')}
-      <button onclick={() => holdSource(selectedSource.id)}>⚖ Estimate power for 20 °C</button>
-      {#if holdMsg}<p class="hint">{holdMsg}</p>{/if}
-    {:else}
-      <p class="hint">Select a source to adjust its power and 3D position. Drag it to move; Shift-drag to change height.</p>
-    {/if}
+    <legend>Energy &amp; heat loss</legend>
+    <dl class="stats">
+      <dt>Heat delivered</dt><dd>{app.stats.heatingKWh.toFixed(3)} kWh</dd>
+      <dt>Cooling delivered</dt><dd>{app.stats.coolingKWh.toFixed(3)} kWh</dd>
+      <dt>Current heat loss</dt><dd>{fmtPower(app.stats.heatLoss.totalW)}</dd>
+      <dt>Roof</dt><dd>{fmtPower(app.stats.heatLoss.roofW)}</dd>
+      <dt>Walls</dt><dd>{fmtPower(app.stats.heatLoss.wallsW)}</dd>
+      <dt>Floor</dt><dd>{fmtPower(app.stats.heatLoss.floorW)}</dd>
+      <dt>Windows &amp; doors</dt><dd>{fmtPower(app.stats.heatLoss.openingsW)}</dd>
+    </dl>
+    <p class="hint">Positive heat loss leaves the room; negative values mean heat is entering from outside. Energy totals accumulate while the simulation runs and clear on reset.</p>
   </fieldset>
-
-  <FurniturePanel />
-
-  <fieldset>
-    <legend>Walls</legend>
-    <label>
-      Material
-      <select
-        value={app.room.wall.material}
-        onchange={(e) => updateWall({ material: e.currentTarget.value as WallMaterialId })}
-      >
-        {#each WALL_MATERIALS as m}<option value={m.id}>{m.label}</option>{/each}
-      </select>
-    </label>
-    <label>
-      <span>Thickness <output>{(app.room.wall.thicknessM * 100).toFixed(0)} cm</output></span>
-      <input
-        type="range"
-        min={LIMITS.thickness.min}
-        max={LIMITS.thickness.max}
-        step={LIMITS.thickness.step}
-        value={app.room.wall.thicknessM}
-        oninput={(e) => updateWall({ thicknessM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <label>
-      Insulation type
-      <select
-        value={app.room.wall.insulation}
-        onchange={(e) => updateWall({ insulation: e.currentTarget.value as InsulationId })}
-      >
-        {#each INSULATIONS as m}<option value={m.id}>{m.label}</option>{/each}
-      </select>
-    </label>
-    <label>
-      <span>
-        Insulation thickness <output>{(app.room.wall.insulationM * 100).toFixed(0)} cm</output>
-      </span>
-      <input
-        type="range"
-        min={LIMITS.insulation.min}
-        max={LIMITS.insulation.max}
-        step={LIMITS.insulation.step}
-        value={app.room.wall.insulationM}
-        oninput={(e) => updateWall({ insulationM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <p class="hint">Wall U-value <output>{wallUValue.toFixed(2)} W/m²K</output> (lower is better). The floor has its own construction in Physical model.</p>
-  </fieldset>
-
-  <fieldset>
-    <legend>Roof</legend>
-    <label>
-      Covering
-      <select
-        value={app.room.roof.material}
-        onchange={(e) => updateRoof({ material: e.currentTarget.value as RoofMaterialId })}
-      >
-        {#each ROOF_MATERIALS as m}<option value={m.id}>{m.label}</option>{/each}
-      </select>
-    </label>
-    <label>
-      <span>Pitch <output>{app.room.roof.pitchDeg.toFixed(0)}°</output></span>
-      <input
-        type="range"
-        min={LIMITS.pitch.min}
-        max={LIMITS.pitch.max}
-        step={LIMITS.pitch.step}
-        value={app.room.roof.pitchDeg}
-        oninput={(e) => updateRoof({ pitchDeg: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <label>
-      <span>Roof insulation <output>{(app.room.roof.insulationM * 100).toFixed(0)} cm</output></span>
-      <input
-        type="range"
-        min={LIMITS.roofInsulation.min}
-        max={LIMITS.roofInsulation.max}
-        step={LIMITS.roofInsulation.step}
-        value={app.room.roof.insulationM}
-        oninput={(e) => updateRoof({ insulationM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <p class="hint">
-      Roof U-value <output>{roofUValue.toFixed(2)} W/m²K</output>. The covering is visual only.
-    </p>
-  </fieldset>
-
-  <fieldset>
-    <legend>Windows &amp; doors</legend>
-    <div class="row">
-      <button onclick={() => addOpening('window')} disabled={app.room.openings.length >= LIMITS.openings}>
-        + Window
-      </button>
-      <button onclick={() => addOpening('door')} disabled={app.room.openings.length >= LIMITS.openings}>
-        + Door
-      </button>
-    </div>
-    {#each app.room.openings as o (o.id)}
-      {@const len = wallLength(app.room, o.side)}
-      <div class="opening" class:sel={app.selection?.kind === 'opening' && app.selection.id === o.id}>
-        <div class="row">
-          <button class="item" onclick={() => select({ kind: 'opening', id: o.id })}>
-            {o.kind === 'window' ? '🪟 Window' : '🚪 Door'} {o.id}
-          </button>
-          <button
-            class:primary={o.open}
-            onclick={() => updateOpening(o.id, { open: !o.open })}
-            aria-pressed={o.open}
-          >
-            {o.open ? 'Open' : 'Closed'}
-          </button>
-          <button onclick={() => removeOpening(o.id)} aria-label="Remove opening {o.id}">🗑</button>
-        </div>
-        <label>
-          Wall
-          <select
-            value={o.side}
-            onchange={(e) => updateOpening(o.id, { side: e.currentTarget.value as WallSide })}
-          >
-            {#each SIDES as s}<option value={s.id}>{s.label}</option>{/each}
-          </select>
-        </label>
-        <label>
-          <span>Position <output>{o.pos.toFixed(1)} m</output></span>
-          <input
-            type="range"
-            min="0"
-            max={len}
-            step="0.1"
-            value={o.pos}
-            oninput={(e) => updateOpening(o.id, { pos: e.currentTarget.valueAsNumber })}
-          />
-        </label>
-        <label>
-          <span>Opening height <output>{o.heightM.toFixed(1)} m</output></span>
-          <input type="range" min="0.3" max={app.room.ceilingM} step="0.1" value={o.heightM}
-            oninput={(e) => updateOpening(o.id, { heightM: e.currentTarget.valueAsNumber })} />
-        </label>
-        <label>
-          <span>Sill above floor <output>{o.sillM.toFixed(1)} m</output></span>
-          <input type="range" min="0" max={app.room.ceilingM - o.heightM} step="0.1" value={o.sillM}
-            oninput={(e) => updateOpening(o.id, { sillM: e.currentTarget.valueAsNumber })} />
-        </label>
-        <label>
-          <span>Width <output>{o.length.toFixed(1)} m</output></span>
-          <input
-            type="range"
-            min={LIMITS.openingLength.min}
-            max={Math.max(LIMITS.openingLength.min, len - 0.2)}
-            step={LIMITS.openingLength.step}
-            value={o.length}
-            oninput={(e) => updateOpening(o.id, { length: e.currentTarget.valueAsNumber })}
-          />
-        </label>
-      </div>
-    {/each}
-    <p class="hint">Windows and doors can sit in any vertical wall. Click one on the wall to open or close it. Open ones lose a lot of heat.</p>
-  </fieldset>
-
-  <fieldset>
+  <fieldset id="inspect-probe">
     <legend>Temperature graph</legend>
     <div class="row">
       <button onclick={addProbe} disabled={app.room.probes.length >= LIMITS.probes}>+ Probe</button>
@@ -520,180 +514,33 @@
     <Graph />
     <p class="hint">Select a numbered probe to set its 3D position. Arrow keys move markers; Page Up/Down changes height.</p>
   </fieldset>
-
-  <fieldset>
-    <legend>Room</legend>
-    <label>
-      <span>Width <output>{app.room.widthM.toFixed(1)} m</output></span>
-      <input
-        type="range"
-        min={LIMITS.size.min}
-        max={LIMITS.size.max}
-        step={LIMITS.size.step}
-        value={app.room.widthM}
-        oninput={(e) => updateRoom({ widthM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <label>
-      <span>Length <output>{app.room.heightM.toFixed(1)} m</output></span>
-      <input
-        type="range"
-        min={LIMITS.size.min}
-        max={LIMITS.size.max}
-        step={LIMITS.size.step}
-        value={app.room.heightM}
-        oninput={(e) => updateRoom({ heightM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <label>
-      <span>Ceiling height <output>{app.room.ceilingM.toFixed(1)} m</output></span>
-      <input
-        type="range"
-        min={LIMITS.size.min}
-        max={LIMITS.size.max}
-        step={LIMITS.size.step}
-        value={app.room.ceilingM}
-        oninput={(e) => updateRoom({ ceilingM: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <label>
-      <span>Outside temperature <output>{app.room.outsideC.toFixed(0)} °C</output></span>
-      <input
-        type="range"
-        min={LIMITS.outside.min}
-        max={LIMITS.outside.max}
-        step={LIMITS.outside.step}
-        value={app.room.outsideC}
-        oninput={(e) => updateRoom({ outsideC: e.currentTarget.valueAsNumber })}
-      />
-    </label>
-    <p class="hint">The room uses X for width, Y for length, and Z for height. Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
-  </fieldset>
-
-  <fieldset>
-    <legend>Save &amp; share</legend>
-    <div class="row">
-      <input type="text" bind:value={name} maxlength="40" aria-label="Room name" />
-      <button onclick={onSave}>Save</button>
-    </div>
-    {#if names.length}
-      <div class="row">
-        <select bind:value={selected} aria-label="Saved rooms">
-          <option value="">Saved rooms…</option>
-          {#each names as n}<option value={n}>{n}</option>{/each}
-        </select>
-        <button onclick={onLoad} disabled={!selected}>Load</button>
-        <button onclick={onDelete} disabled={!selected} aria-label="Delete saved room">🗑</button>
-      </div>
-    {/if}
-    <button onclick={onShare}>🔗 Copy share link</button>
-    <p class="hint status" aria-live="polite">{message}</p>
-  </fieldset>
-
-  <div class="legend" aria-label="Temperature scale">
-    <div class="bar" style:background={paletteCssGradient(app.palette)}></div>
-    <div class="ticks">
-      <span>{Math.round(app.stats.tMax)} °C</span>
-      <span>{Math.round((app.stats.tMax + app.stats.tMin) / 2)} °C</span>
-      <span>{Math.round(app.stats.tMin)} °C</span>
-    </div>
-  </div>
+<PhysicsPanel section="diagnostics" />
+</div>
 </aside>
-
 <style>
-  .tag { font-size: 11px; color: #ffb27a; border: 1px solid #785339; border-radius: 5px; padding: 3px 6px; vertical-align: middle; }
+
   .sidebar {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px;
-    overflow-y: auto;
-    background: #1b1d24;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+    min-height: 0;
+    min-width: 0;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
     position: relative;
   }
-  h1 {
-    margin: 0;
-    font-size: 22px;
-  }
-  fieldset {
-    margin: 0;
-    padding: 10px 12px 12px;
-    border: 1px solid #343845;
-    border-radius: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  legend {
-    padding: 0 6px;
-    color: #9aa3b8;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 14px;
-  }
-  label > span:first-child {
-    display: flex;
-    justify-content: space-between;
-  }
-  output {
-    color: #ffb27a;
-    font-variant-numeric: tabular-nums;
-  }
-  .ends {
-    display: flex;
-    justify-content: space-between;
-    font-size: 11px;
-    color: #7c849a;
-  }
+
   .row {
     display: flex;
     gap: 8px;
   }
-  .row > input[type='text'],
-  .row > select {
-    flex: 1;
-    min-width: 0;
-  }
-  button,
-  select,
-  input[type='text'] {
-    font: inherit;
-    padding: 8px 10px;
-    border-radius: 6px;
-    border: 1px solid #3d4254;
-    background: #262a35;
-    color: inherit;
-    min-height: 40px;
-  }
-  button {
-    cursor: pointer;
-  }
-  button:hover:not(:disabled) {
-    background: #30364a;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  button.primary {
-    background: #d9531e;
-    border-color: #d9531e;
-    flex: 1;
-  }
+
   .row > button:not(.primary) {
     flex: 0 0 auto;
   }
-  input[type='range'] {
-    width: 100%;
-    min-height: 28px;
-    accent-color: #ff7a33;
-  }
+
   .stats {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -702,18 +549,14 @@
     font-size: 13px;
   }
   .stats dt {
-    color: #9aa3b8;
+    color: var(--muted);
   }
   .stats dd {
     margin: 0;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
-  .hint {
-    margin: 0;
-    font-size: 12px;
-    color: #7c849a;
-  }
+
   .thermostat-state {
     display: flex;
     justify-content: space-between;
@@ -722,14 +565,14 @@
     padding: 7px 9px;
     border-radius: 6px;
     background: #262a35;
-    color: #9aa3b8;
+    color: var(--muted);
     font-size: 12px;
   }
   .thermostat-state strong {
     color: #d1d5df;
   }
   .thermostat-state.heating {
-    color: #ffb27a;
+    color: var(--accent);
   }
   .check {
     flex-direction: row;
@@ -782,29 +625,12 @@
   .opening.sel {
     border-color: #5aa9ff;
   }
-  .status {
-    min-height: 1.2em;
-    color: #8fd18f;
-  }
-  .legend {
-    display: flex;
-    gap: 8px;
-    height: 120px;
-  }
-  .bar {
-    width: 18px;
-    border-radius: 4px;
-  }
-  .ticks {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    font-size: 12px;
-    color: #9aa3b8;
-  }
-  @media (max-width: 800px) {
-    .legend {
-      height: 90px;
-    }
-  }
+
+.inspector-heading { display:flex; justify-content:space-between; align-items:center; padding:22px 20px 18px; color:var(--muted); font-size:10px; letter-spacing:1.5px; }
+.inspector-badge { border:1px solid var(--border); border-radius:4px; padding:3px 5px; color:var(--accent); }
+.tabs { display:grid; grid-template-columns:repeat(4,1fr); padding:0 16px; border-bottom:1px solid var(--border); }
+.tabs button { border:0; border-radius:0; background:transparent; color:var(--muted); font-size:12px; padding:12px 4px; border-bottom:2px solid transparent; }
+.tabs button[aria-selected='true'] { border-bottom-color:var(--accent); color:var(--text); }
+.inspector-content { overflow-y:auto; min-height:0; padding:20px 16px; display:flex; flex-direction:column; gap:20px; }
+.inspector-content[hidden] { display:none; }
 </style>

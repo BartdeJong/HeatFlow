@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { paletteCssGradient } from '../render/palette';
   import { onMount, untrack } from 'svelte';
   import { createRenderer, fitCanvas, type HeatmapRenderer } from '../render/heatmap';
   import { defaultCamera, pointOnPlane, project, screenRay, viewTransform, type Vec3, type ViewTransform } from '../render/camera';
@@ -317,14 +318,19 @@
 </script>
 
 <div class="stage">
+  <div class="metric-cards" aria-label="Live simulation readings">
+    <div><span>ROOM AVERAGE</span><strong>{app.stats.mean.toFixed(1)}<small> °C</small></strong></div>
+    <div><span>HOTTEST AIR</span><strong>{app.stats.max.toFixed(1)}<small> °C</small></strong></div>
+    <div><span>HEAT LOSS</span><strong>{Math.abs(app.stats.heatLoss.totalW) >= 1000 ? (app.stats.heatLoss.totalW / 1000).toFixed(2) : app.stats.heatLoss.totalW.toFixed(0)}<small> {Math.abs(app.stats.heatLoss.totalW) >= 1000 ? 'kW' : 'W'}</small></strong></div>
+  </div>
   <div class="heading">
     <span class="eyebrow">HEATFLOW / SPATIAL SIMULATION</span>
-    <h2>Your room, in 3D</h2>
+    <h2>Room overview</h2>
     <p>{app.room.widthM.toFixed(1)} × {app.room.heightM.toFixed(1)} × {app.room.ceilingM.toFixed(1)} m <span>·</span> {app.room.convection ? 'Buoyant airflow' : 'Thermal diffusion'}</p>
   </div>
   <div class="view-tools" aria-label="3D view controls">
-    <button class:active={app.view === 'volume'} onclick={() => (app.view = 'volume')}>Volume</button>
-    <button class:active={app.view === 'slice'} onclick={() => (app.view = 'slice')}>Slice</button>
+    <button aria-pressed={app.view === 'volume'} class:active={app.view === 'volume'} onclick={() => (app.view = 'volume')}>Volume</button>
+    <button aria-pressed={app.view === 'slice'} class:active={app.view === 'slice'} onclick={() => (app.view = 'slice')}>Slice</button>
     <button onclick={() => zoom(1.15)} aria-label="Zoom in">＋</button>
     <button onclick={() => zoom(1 / 1.15)} aria-label="Zoom out">−</button>
     <button onclick={() => app.cameraToken++} aria-label="Reset camera">↺</button>
@@ -361,21 +367,22 @@
       <div class="tip" style:left="{hover.px}px" style:top="{hover.py}px">{hover.temp.toFixed(1)} °C <span>at {hover.z.toFixed(1)} m</span></div>
     {/if}
   </div>
+  <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')}></div><div class="scale-values"><span>{Math.round(app.stats.tMin)}</span><span>{Math.round((app.stats.tMax + app.stats.tMin) / 2)}</span><span>{Math.round(app.stats.tMax)}</span></div></div>
   <div class="view-caption"><span class="live" class:paused={!app.running}></span>{app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
-  <p class="instructions">Drag empty space to rotate <span>·</span> Scroll to zoom <span>·</span> Drag furniture or sources to move <span>·</span> Shift-drag sources to lift</p>
+  <p class="instructions">Drag to orbit <span>·</span> Scroll to zoom <span>·</span> Shift-drag sources to lift</p>
 </div>
 
 <style>
-  .stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: radial-gradient(ellipse at 50% 50%, #222b3b 0, #151b26 52%, #11151d 100%); }
-  .heading { position: absolute; top: 30px; left: 32px; z-index: 2; pointer-events: none; }
+  .stage { flex:1; position: relative; min-height: 0; min-width: 0; overflow: hidden; background: radial-gradient(ellipse at 50% 50%, #222b3b 0, #151b26 52%, #11151d 100%); }
+  .heading { position: absolute; top: 118px; left: 28px; z-index: 2; pointer-events: none; }
   .eyebrow { color: #8e9eb4; font-size: 10px; letter-spacing: 0.17em; }
   h2 { margin: 8px 0; font-size: 25px; font-weight: 500; letter-spacing: -0.03em; }
   .heading p { margin: 0; color: #91a0b6; font-size: 12px; }
   .heading p span, .instructions span, .view-caption > span:not(.live) { margin: 0 8px; color: #536179; }
-  .room { position: absolute; inset: 110px 0 70px; touch-action: none; cursor: grab; user-select: none; }
+  .room { position: absolute; inset: 175px 0 90px; touch-action: none; cursor: grab; user-select: none; }
   .room:active { cursor: grabbing; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
-  .view-tools { position: absolute; top: 30px; right: 24px; z-index: 3; display: flex; gap: 3px; padding: 4px; background: #1b2431d9; border: 1px solid #334055; border-radius: 9px; }
+  .view-tools { position: absolute; bottom: 76px; right: 24px; z-index: 3; display: flex; gap: 3px; padding: 4px; background: #1b2431d9; border: 1px solid #334055; border-radius: 9px; }
   .view-tools button { border: none; background: transparent; color: #9aabc0; padding: 7px 10px; border-radius: 5px; cursor: pointer; font: inherit; font-size: 12px; min-height: 32px; }
   .view-tools button.active { background: #384457; color: #fff; }
   .view-tools button:hover { background: #303d51; color: #fff; }
@@ -394,7 +401,16 @@
   .live { width: 6px; height: 6px; border-radius: 50%; background: #78cfaa; margin-right: 8px; box-shadow: 0 0 8px #78cfaa55; }
   .live.paused { background: #e1b46f; }
   .instructions { position: absolute; left: 20px; right: 20px; bottom: 13px; margin: 0; font-size: 11px; color: #74849d; text-align: center; pointer-events: none; }
-  @media (max-width: 1150px) { .view-tools { top: 112px; right: 15px; } .room { inset: 145px 0 75px; } }
-  @media (max-width: 800px) { .heading { top: 14px; left: 18px; } h2 { font-size: 20px; margin: 4px 0; } .eyebrow { font-size: 9px; } .heading p { font-size: 10px; } .view-tools { top: 14px; right: 12px; } .view-tools button { padding: 5px 7px; } .room { inset: 80px 0 36px; } .view-caption { bottom: 20px; font-size: 10px; } .instructions { display: none; } }
-  @media (max-width: 550px) { .heading p { display: none; } .heading h2 { font-size: 17px; } .view-tools { top: 57px; right: 12px; } .room { inset: 88px 0 30px; } .view-caption { bottom: 10px; } }
+
+.metric-cards { position:absolute; top:22px; left:28px; right:28px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; z-index:2; pointer-events:none; }
+.metric-cards > div { background:#1c2431bb; border:1px solid #354052; border-radius:10px; padding:14px 18px; }
+.metric-cards span { color:var(--muted); font-size:9px; letter-spacing:1px; display:block; margin-bottom:8px; }
+.metric-cards strong { font-size:26px; font-weight:500; letter-spacing:-1px; font-variant-numeric:tabular-nums; }
+.metric-cards small { color:var(--muted); font-size:14px; letter-spacing:0; }
+.metric-cards > div:first-child strong { color:var(--accent); }
+.temperature-scale { position:absolute; bottom:70px; left:28px; width:150px; font-size:10px; color:var(--muted); pointer-events:none; }
+.scale-label,.scale-values { display:flex; justify-content:space-between; } .scale-gradient { height:6px; border-radius:4px; margin:7px 0; }
+.view-caption { bottom:30px; } .instructions { bottom:6px; font-size:10px; }
+@media(max-width:1100px) { h2 { font-size:20px; } }
+@media(max-width:600px) { .metric-cards { left:16px; right:16px; top:16px; gap:7px; } .metric-cards > div { padding:12px 10px; } .metric-cards strong { font-size:22px; } .metric-cards span { font-size:8px; letter-spacing:.4px; } .heading { left:16px; top:110px; } .heading .eyebrow { display:none; } .view-tools { right:16px; bottom:58px; } .room { inset:150px 0 90px; } .temperature-scale { left:16px; bottom:58px; width:95px; } .view-caption { bottom:24px; font-size:10px; white-space:nowrap; } .instructions { display:none; } }
 </style>

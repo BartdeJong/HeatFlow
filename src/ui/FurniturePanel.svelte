@@ -54,10 +54,9 @@
 </fieldset>
 
 <style>
-  fieldset { margin: 0; padding: 10px 12px 12px; border: 1px solid #343845; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
-  legend { padding: 0 6px; color: #9aa3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+
   .presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  button, select { font: inherit; padding: 8px 10px; border-radius: 6px; border: 1px solid #3d4254; background: #262a35; color: inherit; min-height: 40px; }
+
   button { cursor: pointer; }
   button:hover:not(:disabled) { background: #30364a; }
   button:disabled { opacity: 0.5; cursor: default; }
@@ -68,10 +67,6 @@
   li { display: flex; gap: 6px; }
   .item { flex: 1; text-align: left; }
   .item span { display: block; margin-top: 3px; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
-  label > span { display: flex; justify-content: space-between; }
-  input[type='range'] { width: 100%; min-height: 28px; accent-color: #ff7a33; }
-  output { color: #ffb27a; font-variant-numeric: tabular-nums; }
-  .hint { margin: 0; font-size: 12px; color: #7c849a; }
-  .temperature { margin: 0; font-size: 12px; color: #9aa3b8; display: flex; justify-content: space-between; }
+
+  .temperature { margin: 0; font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; }
 </style>
