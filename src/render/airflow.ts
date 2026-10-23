@@ -8,9 +8,11 @@ interface FlowField {
 interface Trail {
   points: Vec3[];
   temperatures: number[];
+  speedMps: number;
 }
 
 const TRANSITION_SECONDS = 0.25;
+const REFERENCE_FLOW_SPEED_MPS = 0.2;
 
 /** Crossfade intact streamlines rather than moving their vertices through furniture. */
 export class AirflowTrails {
@@ -35,7 +37,11 @@ export class AirflowTrails {
     // Preserve empty seed slots: a disappearing path must not rephase other trails.
     this.current = seeds.map((seed) => {
       const points = traceAirflow(field, size, seed);
-      return { points, temperatures: points.map((p) => field.sample(...p)) };
+      const speedMps = points.reduce((sum, p) => {
+        const velocity = field.sampleVelocity(...p);
+        return sum + Math.hypot(...velocity);
+      }, 0) / Math.max(1, points.length);
+      return { points, temperatures: points.map((p) => field.sample(...p)), speedMps };
     });
     this.elapsed = elapsed;
     this.transition = 0;
@@ -49,9 +55,10 @@ export class AirflowTrails {
   }
 }
 
-/** A soft pulse with a fixed period, independent of changing streamline length. */
-export function airflowHighlight(phase: number, seedIndex: number, segment: number): number {
-  const distance = ((phase * 12 + seedIndex * 7.3 - segment) % 44 + 66) % 44 - 22;
+/** A soft pulse whose speed follows the mean flow speed along its streamline. */
+export function airflowHighlight(phase: number, seedIndex: number, segment: number, speedMps = REFERENCE_FLOW_SPEED_MPS): number {
+  const speedScale = Math.min(4, Math.max(0, speedMps) / REFERENCE_FLOW_SPEED_MPS);
+  const distance = ((phase * 12 * speedScale + seedIndex * 7.3 - segment) % 44 + 66) % 44 - 22;
   return Math.exp(-distance * distance / 12);
 }
 

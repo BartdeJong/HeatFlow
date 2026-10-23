@@ -74,7 +74,7 @@ it('keeps seed identities when a path is blocked and clears history on reset', (
   expect(trails.phase).toBe(0);
 });
 
-it('uses the same fade and pulse timing at different frame rates and simulation speeds', () => {
+it('scales pulse speed with airflow while keeping wall-clock timing frame-rate independent', () => {
   const field = { sampleVelocity: (): [number, number, number] => [0, 0, 1], sample: () => 20 };
   const make = (frames: number, speed: number) => {
     const trails = new AirflowTrails();
@@ -85,6 +85,8 @@ it('uses the same fade and pulse timing at different frame rates and simulation 
   const a = make(4, 1), b = make(15, 1000);
   expect(a.layers[1].opacity).toBeCloseTo(b.layers[1].opacity);
   expect(airflowHighlight(a.phase, 3, 10)).toBeCloseTo(airflowHighlight(b.phase, 3, 10));
+  expect(airflowHighlight(0.5, 0, 0, 0.4)).toBeCloseTo(airflowHighlight(1, 0, 0, 0.2));
+  expect(airflowHighlight(0.5, 0, 0, 0.1)).toBeCloseTo(airflowHighlight(0.25, 0, 0, 0.2));
   // Pulse wraps continuously, without the previous hard on/off leading edge.
   expect(airflowHighlight(44 / 12 - 0.00001, 0, 0)).toBeCloseTo(airflowHighlight(44 / 12 + 0.00001, 0, 0));
 });

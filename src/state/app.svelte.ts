@@ -43,6 +43,7 @@ export const app = $state({
   showVectors: false,
   view: 'volume' as 'volume' | 'slice',
   showAirflow: true,
+  showFps: false,
   sliceAxis: 'z' as 'x' | 'y' | 'z',
   sliceFraction: 0.5,
   cameraToken: 0,

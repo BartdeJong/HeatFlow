@@ -525,6 +525,10 @@
       <input type="checkbox" bind:checked={app.showVectors} />
       Heat-flow arrows
     </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={app.showFps} />
+      Show framerate
+    </label>
     {#if app.room.convection || fanRunning}
       <label class="check">
         <input type="checkbox" bind:checked={app.showAirflow} />

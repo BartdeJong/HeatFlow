@@ -373,11 +373,11 @@
       for (const layer of airflow.layers) {
         if (layer.opacity === 0) continue;
         for (let i = 0; i < layer.trails.length; i++) {
-          const { points: path, temperatures } = layer.trails[i];
+          const { points: path, temperatures, speedMps } = layer.trails[i];
           for (let j = 1; j < path.length; j++) {
             const middle = path[j].map((n, axis) => (n + path[j - 1][axis]) / 2) as Vec3;
             if (boxes.some((box) => intersectBox(middle, v.normal, box) !== null)) continue;
-            const highlight = airflowHighlight(airflow.phase, i, j);
+            const highlight = airflowHighlight(airflow.phase, i, j, speedMps);
             const taper = Math.min(1, j / 3, (path.length - j) / 3);
             const a = project(v, path[j - 1]), b = project(v, path[j]);
             ctx.strokeStyle = `rgba(151,220,116,${layer.opacity * taper * (0.045 + 0.68 * highlight)})`;
@@ -539,6 +539,9 @@
     <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')} style:opacity={gradientOpacityValue(app.gradientOpacity)}></div><div class="scale-values"><span>{TEMPERATURE_MIN_C}</span><span>{ROOM_TEMPERATURE_C}</span><span>{TEMPERATURE_MAX_C}</span></div></div>
   {/if}
   <div class="view-caption"><span class="live" class:paused={!app.running}></span>{cameraMode === 'walk' ? 'First-person room view' : app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
+  {#if app.showFps}
+    <div class="fps" aria-live="off">{app.stats.renderFPS.toFixed(0)} FPS</div>
+  {/if}
   {#if !app.focusView}
     <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag heat or cold sources to lift · Move fan horizontally'}</p>
   {/if}
@@ -555,6 +558,7 @@
   .room { position: absolute; inset: 175px 0 90px; touch-action: none; cursor: grab; user-select: none; }
   .room:active { cursor: grabbing; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+  .fps { position: absolute; bottom: 13px; left: 120px; z-index: 3; padding: 4px 8px; background: #1b2431d9; border: 1px solid #334055; border-radius: 6px; color: #cfd9e8; font: 12px ui-monospace, monospace; pointer-events: none; }
   .view-tools { position: absolute; bottom: 76px; right: 24px; z-index: 3; display: flex; gap: 3px; padding: 4px; background: #1b2431d9; border: 1px solid #334055; border-radius: 9px; }
   .view-tools button { border: none; background: transparent; color: #9aabc0; padding: 7px 10px; border-radius: 5px; cursor: pointer; font: inherit; font-size: 12px; min-height: 32px; }
   .view-tools button.active { background: #384457; color: #fff; }
