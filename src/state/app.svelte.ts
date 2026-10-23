@@ -18,6 +18,7 @@ import {
 import { Recorder } from '../sim/recorder';
 import { roomFromHash } from '../persist/share';
 import type { PaletteId } from '../render/palette';
+import { TEMPERATURE_MIN_C, TEMPERATURE_MAX_C } from '../render/temperature-scale';
 import { furnitureExtent, furnitureOverlap } from '../sim/furniture';
 import { getModel, emitterPreset, type ModelConfig } from '../sim/model';
 
@@ -48,7 +49,7 @@ export const app = $state({
   graphTick: 0,
   furnitureTemperatures: {} as Record<number, number>,
   placementMessage: '',
-  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: 0, tMax: 30, renderFPS: 0, achievedSpeed: 0, diagnostics: { storedEnergyJ: 0, energyBalanceJ: 0, relativeEnergyError: 0, sensorC: 20, ventilationACH: 0, pressureResidual: 0, maxDivergence: 0, iterations: 0, failure: null as string | null, solarW: 0, outsideC: 0, netExternalJ: 0, surfaceTemperatures: [] as { id: string; label: string; temperatureC: number }[] }, heatingKWh: 0, coolingKWh: 0, thermostatHeating: true,
+  stats: { elapsed: 0, min: 20, max: 20, mean: 20, tMin: TEMPERATURE_MIN_C, tMax: TEMPERATURE_MAX_C, renderFPS: 0, achievedSpeed: 0, diagnostics: { storedEnergyJ: 0, energyBalanceJ: 0, relativeEnergyError: 0, sensorC: 20, ventilationACH: 0, pressureResidual: 0, maxDivergence: 0, iterations: 0, failure: null as string | null, solarW: 0, outsideC: 0, netExternalJ: 0, surfaceTemperatures: [] as { id: string; label: string; temperatureC: number }[] }, heatingKWh: 0, coolingKWh: 0, thermostatHeating: true,
     heatLoss: { roofW: 0, wallsW: 0, floorW: 0, openingsW: 0, ventilationW: 0, totalW: 0 } },
 });
 

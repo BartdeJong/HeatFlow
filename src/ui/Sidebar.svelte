@@ -34,6 +34,7 @@
     type WallSide,
   } from '../sim/config';
   import { PALETTES, PALETTE_IDS } from '../render/palette';
+  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C } from '../render/temperature-scale';
   import Graph from './Graph.svelte';
   import FurniturePanel from './FurniturePanel.svelte';
   import PhysicsPanel from './PhysicsPanel.svelte';
@@ -146,7 +147,7 @@
       />
     </label>
 
-    <p class="hint">The room uses X for width, Y for length, and Z for height. Changing the size restarts the simulation. The colour scale adapts to the current temperatures.</p>
+    <p class="hint">The room uses X for width, Y for length, and Z for height. Changing the size restarts the simulation. The colour scale stays at {TEMPERATURE_MIN_C}–{TEMPERATURE_MAX_C} °C, with a faint tint near {ROOM_TEMPERATURE_C} °C.</p>
   </fieldset>
   <fieldset id="inspect-source">
     <legend>Sources</legend>

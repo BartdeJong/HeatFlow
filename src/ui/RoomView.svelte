@@ -6,6 +6,7 @@
   import { AirflowTrails, airflowHighlight } from '../render/airflow';
   import { TemperatureDisplay } from '../render/temperature';
   import { paletteColor } from '../render/palette';
+  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, temperaturePosition } from '../render/temperature-scale';
   import { SimulationClient } from '../sim/runtime';
   import type { SimulationField } from '../sim/field';
   import { getEmitter } from '../sim/model';
@@ -208,7 +209,7 @@
     return [[x, a, lo], [x, b, lo], [x, b, hi], [x, a, hi]];
   }
 
-  function drawOverlay(v: ViewTransform, tMin: number, tMax: number, wallDt: number) {
+  function drawOverlay(v: ViewTransform, wallDt: number) {
     const dpr = fitCanvas(overlay, 2);
     const ctx = overlay.getContext('2d')!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, v.width, v.height);
@@ -358,7 +359,7 @@
             const highlight = airflowHighlight(airflow.phase, i, j);
             const taper = Math.min(1, j / 3, (path.length - j) / 3);
             const a = project(v, path[j - 1]), b = project(v, path[j]);
-            const rgb = paletteColor(app.palette, (temperatures[j] - tMin) / (tMax - tMin));
+            const rgb = paletteColor(app.palette, temperaturePosition(temperatures[j]));
             ctx.strokeStyle = `rgba(${rgb.join(',')},${layer.opacity * taper * (0.14 + 0.8 * highlight)})`;
             ctx.lineWidth = 1 + highlight * 1.6;
             ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
@@ -404,23 +405,18 @@
       if (snapshot.diagnostics.failure) app.running = false;
     };
     let raf = 0, last = performance.now(), lastStats = 0, fpsSince = performance.now(), fpsFrames = 0;
-    let dispMin = app.stats.tMin, dispMax = app.stats.tMax;
     const frame = (now: number) => {
       fpsFrames++;
       if(now-fpsSince>=1000) { app.stats.renderFPS=fpsFrames*1000/(now-fpsSince); fpsSince=now; fpsFrames=0; }
       const wallDt = Math.min(0.1, (now - last) / 1000); last = now;
       if (cameraMode === 'walk') updateWalker(wallDt);
-      const s = sim.stats();
-      const displayed = temperatureDisplay.update(sim, app.running ? wallDt : 0);
-      const targetMin = Math.floor(displayed.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(displayed.max / 2) * 2);
-      const rangeBlend = app.running ? -Math.expm1(-wallDt / 0.2) : 0;
-      dispMin += (targetMin - dispMin) * rangeBlend; dispMax += (targetMax - dispMax) * rangeBlend;
+      temperatureDisplay.update(sim, app.running ? wallDt : 0);
       transform = cameraMode === 'walk'
         ? walkTransform(app.room, walkCamera, walkPosition, canvas.clientWidth, canvas.clientHeight)
         : viewTransform(app.exterior ? { ...app.room, ceilingM: app.room.ceilingM + roofGeometry(app.room).rise + 0.5 } : app.room, camera, canvas.clientWidth, canvas.clientHeight);
-      renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, walkMode: cameraMode === 'walk', temperatures: displayed, temperatureField: temperatureDisplay,
+      renderer!.render(sim, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, walkMode: cameraMode === 'walk', temperatureField: temperatureDisplay,
         furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
-      drawOverlay(transform, dispMin, dispMax, wallDt);
+      drawOverlay(transform, wallDt);
       markers = cameraMode === 'walk' ? [] : [
         ...app.room.sources.map((p) => ({ ...p, kind: 'source' as const, cold: p.kind === 'cold', fan: p.kind === 'fan' })),
         ...app.room.probes.map((p) => ({ ...p, kind: 'probe' as const, cold: false, fan: false })),
@@ -434,7 +430,7 @@
         return { id: f.id, label: FURNITURE_PRESETS.find((item) => item.id === f.kind)!.label, px: p.x, py: p.y };
       });
       if (now - lastStats > 200) {
-        lastStats = now; app.stats.tMin = dispMin; app.stats.tMax = dispMax;
+        lastStats = now;
         hover = null;
         if (cameraMode !== 'walk' && hoverRaw && !drag && !orbit) {
           const axis = app.view === 'slice' ? ['x', 'y', 'z'].indexOf(app.sliceAxis) as 0 | 1 | 2 : 2;
@@ -510,7 +506,7 @@
       <div class="tip" style:left="{hover.px}px" style:top="{hover.py}px">{hover.temp.toFixed(1)} °C <span>at {hover.z.toFixed(1)} m</span></div>
     {/if}
   </div>
-  <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')}></div><div class="scale-values"><span>{Math.round(app.stats.tMin)}</span><span>{Math.round((app.stats.tMax + app.stats.tMin) / 2)}</span><span>{Math.round(app.stats.tMax)}</span></div></div>
+  <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')}></div><div class="scale-values"><span>{TEMPERATURE_MIN_C}</span><span>{ROOM_TEMPERATURE_C}</span><span>{TEMPERATURE_MAX_C}</span></div></div>
   <div class="view-caption"><span class="live" class:paused={!app.running}></span>{cameraMode === 'walk' ? 'First-person room view' : app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
   <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag heat or cold sources to lift · Move fan horizontally'}</p>
 </div>

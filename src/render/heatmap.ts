@@ -3,6 +3,7 @@ import { dot, project, type Vec3, type ViewTransform } from './camera';
 import { furnitureBoxes, type FurnitureBox } from '../sim/furniture';
 import type { Furniture } from '../sim/config';
 import type { SimulationField } from '../sim/field';
+import { TEMPERATURE_MIN_C, TEMPERATURE_MAX_C, ROOM_TEMPERATURE_C, NEUTRAL_TEMPERATURE_STRENGTH, temperaturePosition, temperatureStrength } from './temperature-scale';
 
 export interface RenderView {
   transform: ViewTransform;
@@ -11,13 +12,12 @@ export interface RenderView {
   axis: 'x' | 'y' | 'z';
   fraction: number;
   walkMode?: boolean;
-  temperatures?: { min: number; max: number; mean: number };
   temperatureField?: { T: Float32Array; sample(x: number, y: number, z: number): number };
   furniture?: Furniture[];
   selectedFurnitureId?: number;
 }
 export interface HeatmapRenderer {
-  render(sim: SimulationField, tMin: number, tMax: number, view: RenderView): void;
+  render(sim: SimulationField, view: RenderView): void;
   setPalette(id: PaletteId): void;
   resize(): void;
   dispose(): void;
@@ -35,7 +35,6 @@ uniform sampler2D uPalette;
 uniform vec3 uSize, uOrigin, uNormal, uRight, uUp;
 uniform vec2 uResolution;
 uniform float uScale, uFraction;
-uniform vec3 uThermal;
 uniform int uMode, uAxis, uPerspective, uWalkMode;
 uniform int uBoxCount;
 uniform vec4 uBoxMin[72], uBoxMax[72];
@@ -43,6 +42,11 @@ uniform vec3 uFurnitureColor[8];
 uniform vec2 uFurnitureStyle[8];
 out vec4 outColor;
 vec3 color(float t) { return texture(uPalette, vec2(clamp(t, 0.002, 0.998), 0.5)).rgb; }
+float strength(float t) {
+  float temperatureC = ${TEMPERATURE_MIN_C.toFixed(1)} + t * ${(TEMPERATURE_MAX_C - TEMPERATURE_MIN_C).toFixed(1)};
+  float x = clamp(abs(temperatureC - ${ROOM_TEMPERATURE_C.toFixed(1)}) / ${(TEMPERATURE_MAX_C - ROOM_TEMPERATURE_C).toFixed(1)}, 0.0, 1.0);
+  return ${NEUTRAL_TEMPERATURE_STRENGTH} + ${(1 - NEUTRAL_TEMPERATURE_STRENGTH)} * x * x * (3.0 - 2.0 * x);
+}
 void main() {
   vec2 pixel = (gl_FragCoord.xy - uResolution * 0.5) / uScale;
   vec3 ro = uPerspective == 1 ? uOrigin : uOrigin + uRight * pixel.x + uUp * pixel.y;
@@ -52,6 +56,7 @@ void main() {
   vec3 lo = min(a,b), hi = max(a,b);
   float entry = max(max(lo.x,lo.y),lo.z), exit = min(min(hi.x,hi.y),hi.z);
   if (exit < max(0.0,entry)) { outColor = vec4(0); return; }
+  entry = max(0.0, entry);
   float roomExit = exit;
   float objectT = exit + 1.0;
   vec3 objectColor = vec3(0);
@@ -84,11 +89,11 @@ void main() {
     if (t < entry - 0.0001 || t > exit + 0.0001) { outColor = vec4(0); return; }
     vec3 pos = ro + rd * t;
     if (texture(uSolid, pos / uSize).r > 0.0) { outColor = vec4(0); return; }
-    outColor = vec4(color(texture(uTemp, pos / uSize).r), 0.94);
+    float temperature = texture(uTemp, pos / uSize).r;
+    outColor = vec4(color(temperature), 0.94 * strength(temperature));
     return;
   }
-  // Show interior temperature anomalies as clouds. The reference is the volume mean,
-  // so a plume passing through the centre cannot disappear into its own reference.
+  // Cloud density follows distance from 20°C, independent of the room's mean.
   vec3 sum = vec3(0); float opacity = 0.0;
   exit = min(exit, objectT);
   float stepSize = (exit - entry) / 80.0;
@@ -97,18 +102,16 @@ void main() {
     vec3 pos = ro + rd * (entry + (float(i) + 0.5) * stepSize);
     if (texture(uSolid, pos / uSize).r > 0.0) continue;
     float t = texture(uTemp, pos / uSize).r;
-    float delta = t - uThermal.x;
-    float contrast = abs(delta) / (delta >= 0.0 ? uThermal.y : uThermal.z);
     vec3 faceDistance = min(pos, uSize - pos);
     float edge = smoothstep(0.0, roomScale * 0.05, min(min(faceDistance.x, faceDistance.y), faceDistance.z));
-    float density = 12.0 / roomScale * pow(smoothstep(0.04, 0.9, contrast), 1.5) * edge;
+    float density = 12.0 / roomScale * pow(strength(t), 1.5) * edge;
     float alpha = 1.0 - exp(-density * stepSize);
     sum += (1.0 - opacity) * color(t) * alpha;
     opacity += (1.0 - opacity) * alpha;
   }
   float rear = texture(uTemp, (ro + rd * (exit - 0.001)) / uSize).r;
   bool hitFurniture = objectT <= roomExit;
-  float rearAlpha = (hitFurniture || uWalkMode == 1) ? 1.0 : 0.06;
+  float rearAlpha = hitFurniture ? 1.0 : (uWalkMode == 1 ? 0.94 : 0.06) * strength(rear);
   sum += (1.0 - opacity) * (hitFurniture ? objectColor : color(rear)) * rearAlpha;
   opacity += (1.0 - opacity) * rearAlpha;
   outColor = vec4(sum / max(opacity, 0.001), opacity);
@@ -176,13 +179,12 @@ function createWebGLRenderer(canvas: HTMLCanvasElement, palette: PaletteId): Hea
   const mins = new Float32Array(72 * 4), maxs = new Float32Array(72 * 4);
   const colors = new Float32Array(8 * 3), styles = new Float32Array(8 * 2);
   return {
-    render(sim, tMin, tMax, view) {
+    render(sim, view) {
       const dpr = fitCanvas(canvas);
       gl.viewport(0, 0, canvas.width, canvas.height);
       if (bytes.length !== sim.T.length) bytes = new Uint8Array(sim.T.length);
-      const span = tMax - tMin || 1;
       const field = view.temperatureField ?? sim;
-      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.max(0, Math.min(255, Math.round(255 * (field.T[i] - tMin) / span)));
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.round(255 * temperaturePosition(field.T[i]));
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, temp);
       const key = `${sim.nx}|${sim.ny}|${sim.nz}`;
       if (grid !== key) {
@@ -221,8 +223,6 @@ function createWebGLRenderer(canvas: HTMLCanvasElement, palette: PaletteId): Hea
       gl.uniform1i(uniform('uPerspective'), v.perspective ? 1 : 0);
       gl.uniform1i(uniform('uWalkMode'), view.walkMode ? 1 : 0);
       gl.uniform1f(uniform('uFraction'), view.fraction);
-      const { min, max, mean } = view.temperatures ?? sim.stats();
-      gl.uniform3f(uniform('uThermal'), (mean - tMin) / span, Math.max(0.5, max - mean) / span, Math.max(0.5, mean - min) / span);
       gl.uniform1i(uniform('uMode'), view.mode === 'slice' ? 1 : 0);
       gl.uniform1i(uniform('uAxis'), ['x', 'y', 'z'].indexOf(view.axis));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -240,7 +240,7 @@ function createWebGLRenderer(canvas: HTMLCanvasElement, palette: PaletteId): Hea
 function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): HeatmapRenderer {
   const ctx = canvas.getContext('2d')!;
   return {
-    render(sim, tMin, tMax, view) {
+    render(sim, view) {
       const dpr = fitCanvas(canvas);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
       const axis = view.mode === 'slice' ? ['x', 'y', 'z'].indexOf(view.axis) : 2;
@@ -248,12 +248,11 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
       const levels = view.mode === 'slice' ? [view.fraction] : Array.from({ length: 14 }, (_, i) => (i + 0.5) / 14);
       levels.sort((a, b) => (a - b) * view.transform.normal[axis]);
       const n = 22;
-      const { min, max, mean } = view.temperatures ?? sim.stats();
       const surfaces: { points: Vec3[]; color: string; depth: number; edge?: string }[] = [];
       const depthOf = (point: Vec3) => view.transform.perspective
         ? -dot(point.map((n, i) => n - view.transform.origin[i]) as Vec3, view.transform.normal)
         : dot(point, view.transform.normal);
-      if (view.walkMode) {
+      if (view.walkMode && view.mode === 'volume') {
         // The fallback renderer has no ray marcher, so build a lightly tessellated
         // thermal shell to make the room boundaries visible from the inside.
         const divisions = 12;
@@ -267,10 +266,11 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
         ];
         for (const face of faces) for (let y = 0; y < divisions; y++) for (let x = 0; x < divisions; x++) {
           const p = face(x + 0.5, y + 0.5);
-          const rgb = paletteColor(palette, ((view.temperatureField ?? sim).sample(...p) - tMin) / (tMax - tMin || 1));
+          const temp = (view.temperatureField ?? sim).sample(...p);
+          const rgb = paletteColor(palette, temperaturePosition(temp));
           const points = [face(x, y), face(x + 1, y), face(x + 1, y + 1), face(x, y + 1)];
           const center = points[0].map((n, i) => (n + points[2][i]) / 2) as Vec3;
-          surfaces.push({ points, color: `rgba(${rgb.join(',')},0.92)`, depth: depthOf(center) });
+          surfaces.push({ points, color: `rgba(${rgb.join(',')},${0.94 * temperatureStrength(temp)})`, depth: depthOf(center) });
         }
       }
       for (const level of levels) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
@@ -281,9 +281,9 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
         const p = point(i + 0.5, j + 0.5);
         if (sim.isSolid(...p)) continue;
         const temp = (view.temperatureField ?? sim).sample(...p);
-        const rgb = paletteColor(palette, (temp - tMin) / (tMax - tMin || 1));
-        const contrast = Math.abs(temp - mean) / Math.max(0.5, temp >= mean ? max - mean : mean - min);
-        const alpha = view.mode === 'slice' ? 0.96 : Math.min(0.65, Math.max(0, contrast - 0.04) ** 1.5 * 0.8);
+        const rgb = paletteColor(palette, temperaturePosition(temp));
+        const strength = temperatureStrength(temp);
+        const alpha = view.mode === 'slice' ? 0.94 * strength : Math.min(0.65, strength ** 1.5 * 0.8);
         if (alpha < 0.005) continue;
         surfaces.push({ color: `rgba(${rgb.join(',')},${alpha})`, depth: depthOf(p),
           points: [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(([a, b]) => point(a, b)) });
