@@ -45,6 +45,35 @@ export function isValidFootprint(points: unknown, widthM: number, heightM: numbe
   return true;
 }
 
+export function simplifyFootprint(points: readonly FootprintPoint[]): FootprintPoint[] {
+  const simplified = points.map((point) => ({ ...point }));
+  let changed = true;
+  while (changed && simplified.length > 1) {
+    changed = false;
+    for (let i = 0; i < simplified.length; i++) {
+      const previous = simplified[(i + simplified.length - 1) % simplified.length];
+      const point = simplified[i];
+      const nextIndex = (i + 1) % simplified.length;
+      const next = simplified[nextIndex];
+      if ((point.x === next.x && point.y === next.y) ||
+        (previous.x === point.x && previous.y === point.y)) {
+        simplified.splice(point.x === next.x && point.y === next.y ? nextIndex : i, 1);
+        changed = true;
+        break;
+      }
+      const collinearForward =
+        (previous.x === point.x && point.x === next.x && (point.y - previous.y) * (next.y - point.y) > 0) ||
+        (previous.y === point.y && point.y === next.y && (point.x - previous.x) * (next.x - point.x) > 0);
+      if (collinearForward) {
+        simplified.splice(i, 1);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return simplified;
+}
+
 function segmentsIntersect(a: FootprintPoint, b: FootprintPoint, c: FootprintPoint, d: FootprintPoint): boolean {
   if (a.x === b.x && c.y === d.y) return a.x >= Math.min(c.x, d.x) && a.x <= Math.max(c.x, d.x) &&
     c.y >= Math.min(a.y, b.y) && c.y <= Math.max(a.y, b.y);

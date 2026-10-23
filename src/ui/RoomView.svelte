@@ -1,18 +1,18 @@
 <script lang="ts">
-  import { paletteCssGradient } from '../render/palette';
+  import { paletteColor, paletteCssGradient } from '../render/palette';
   import { onMount, untrack } from 'svelte';
   import { createRenderer, fitCanvas, type HeatmapRenderer } from '../render/heatmap';
   import { defaultCamera, dot, pointOnPlane, project, screenRay, viewTransform, walkTransform, type Camera, type Vec3, type ViewTransform } from '../render/camera';
   import { AirflowTrails, airflowHighlight } from '../render/airflow';
   import { TemperatureDisplay } from '../render/temperature';
-  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, gradientOpacityValue } from '../render/temperature-scale';
+  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, gradientOpacityValue, temperaturePosition } from '../render/temperature-scale';
   import { SimulationClient } from '../sim/runtime';
   import type { SimulationField } from '../sim/field';
-  import { getEmitter } from '../sim/model';
+  import { floorLayers, getEmitter, type ThermalLayer } from '../sim/model';
   import { getOpeningWallIndex, type Opening } from '../sim/config';
   import { DEFAULT_CEILING_FAN, FURNITURE_PRESETS, ROOF_MATERIALS, roofGeometry } from '../sim/config';
   import { footprintContains, footprintLineIntervals, footprintRectangles, footprintWalls } from '../sim/footprint';
-  import { furnitureBoxes, intersectBox } from '../sim/furniture';
+  import { furnitureBoxes, interiorWallFurniture, intersectBox, physicalFurniture } from '../sim/furniture';
   import { app, moveItem, recorder, select, updateFurniture, updateOpening } from '../state/app.svelte';
 
   let canvas: HTMLCanvasElement;
@@ -26,6 +26,12 @@
   let walkPosition: Vec3 = [0, 0, 1.6];
   let cameraMode = $state<'orbit' | 'walk'>('orbit');
   const walkKeys = new Set<string>();
+  function floorLayerColor(layer: ThermalLayer) {
+    const label = layer.label.toLowerCase();
+    if (label.includes('insulation') || layer.k <= 0.06) return '#48bfd3';
+    if (label.includes('concrete')) return '#8c9aaa';
+    return '#c69b70';
+  }
   const handleWalkBlur = () => walkKeys.clear();
   let transform: ViewTransform | undefined;
   let drag: { kind: 'source' | 'probe' | 'furniture'; id: number; x: number; y: number; z: number; px: number; py: number } | null = null;
@@ -35,7 +41,7 @@
   let markers = $state<{ kind: 'source' | 'probe'; id: number; px: number; py: number; x: number; y: number; z: number; cold: boolean; fan: boolean }[]>([]);
   let openingMarkers = $state<{ id: number; px: number; py: number; kind: string; open: boolean }[]>([]);
   let furnitureMarkers = $state<{ id: number; label: string; px: number; py: number }[]>([]);
-  const boxes = $derived(app.room.furniture.flatMap(furnitureBoxes));
+  const boxes = $derived(physicalFurniture(app.room).flatMap(furnitureBoxes));
   const hasActiveCeilingFan = $derived(app.room.sources.some((source) => source.kind === 'fan' && source.fanEnabled !== false));
   const airflow = new AirflowTrails();
   const temperatureDisplay = new TemperatureDisplay();
@@ -322,6 +328,15 @@
     }
     for (const point of app.room.footprint ?? [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: l }, { x: 0, y: l }])
       line([point.x, point.y, 0], [point.x, point.y, h], '#bfd4e780', 1.5);
+    for (const wall of interiorWallFurniture(app.room)) for (const box of furnitureBoxes(wall)) {
+      const [x0, y0] = box.min, [x1, y1] = box.max;
+      polygon([[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]], '#bfa18450', '#e0c5a5bb');
+      polygon([[x0, y0, 0], [x1, y0, 0], [x1, y0, h], [x0, y0, h]], '#bfa18488', '#e0c5a5bb');
+      polygon([[x0, y1, 0], [x1, y1, 0], [x1, y1, h], [x0, y1, h]], '#bfa18488', '#e0c5a5bb');
+      polygon([[x0, y0, 0], [x0, y1, 0], [x0, y1, h], [x0, y0, h]], '#bfa18470', '#e0c5a5bb');
+      polygon([[x1, y0, 0], [x1, y1, 0], [x1, y1, h], [x1, y0, h]], '#bfa18470', '#e0c5a5bb');
+      polygon([[x0, y0, h], [x1, y0, h], [x1, y1, h], [x0, y1, h]], '#bfa18440', '#e0c5a5bb');
+    }
     for (const o of app.room.openings) {
       const points = openingPoints(o).map((p) => project(v, p));
       ctx.beginPath(); points.forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath();
@@ -344,6 +359,19 @@
           const b: Vec3 = axis === 0 ? [coordinate, to, 0] : [to, coordinate, 0];
           const c: Vec3 = [a[0], a[1], h], d: Vec3 = [b[0], b[1], h];
           line(a, b, '#ffc98c', 1.5); line(b, d, '#ffc98c', 1.5); line(d, c, '#ffc98c', 1.5); line(c, a, '#ffc98c', 1.5);
+        }
+        let layerTop = 0;
+        for (const layer of floorLayers(app.room)) {
+          const layerBottom = layerTop - layer.thicknessM;
+          const color = floorLayerColor(layer);
+          for (const [from, to] of intervals) {
+            const start: Vec3 = axis === 0 ? [coordinate, from, layerTop] : [from, coordinate, layerTop];
+            const end: Vec3 = axis === 0 ? [coordinate, to, layerTop] : [to, coordinate, layerTop];
+            const lowerEnd: Vec3 = [end[0], end[1], layerBottom];
+            const lowerStart: Vec3 = [start[0], start[1], layerBottom];
+            polygon([start, end, lowerEnd, lowerStart], `${color}66`, `${color}ff`);
+          }
+          layerTop = layerBottom;
         }
       }
     }
@@ -380,7 +408,9 @@
             const highlight = airflowHighlight(airflow.phase, i, j, speedMps);
             const taper = Math.min(1, j / 3, (path.length - j) / 3);
             const a = project(v, path[j - 1]), b = project(v, path[j]);
-            ctx.strokeStyle = `rgba(151,220,116,${layer.opacity * taper * (0.045 + 0.68 * highlight)})`;
+            const temperature = (temperatures[j - 1] + temperatures[j]) / 2;
+            const color = paletteColor(app.palette, temperaturePosition(temperature));
+            ctx.strokeStyle = `rgba(${color.join(',')},${layer.opacity * taper * (0.045 + 0.68 * highlight)})`;
             ctx.lineWidth = 1 + highlight * 0.8;
             ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
           }
@@ -535,6 +565,14 @@
       <div class="tip" style:left="{hover.px}px" style:top="{hover.py}px">{hover.temp.toFixed(1)} °C <span>at {hover.z.toFixed(1)} m</span></div>
     {/if}
   </div>
+  {#if app.view === 'slice' && app.sliceAxis !== 'z'}
+    <div class="floor-layer-legend" aria-label="Floor construction shown below the slab">
+      <strong>Floor build-up below slab</strong>
+      {#each floorLayers(app.room) as layer}
+        <span><i style:background={floorLayerColor(layer)}></i>{layer.label}<b>{(layer.thicknessM * 100).toFixed(0)} cm</b></span>
+      {/each}
+    </div>
+  {/if}
   {#if app.showTemperatureGradient}
     <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')} style:opacity={gradientOpacityValue(app.gradientOpacity)}></div><div class="scale-values"><span>{TEMPERATURE_MIN_C}</span><span>{ROOM_TEMPERATURE_C}</span><span>{TEMPERATURE_MAX_C}</span></div></div>
   {/if}
@@ -585,6 +623,7 @@
   .stage.focused .room { inset:0; }
   .stage.focused .view-tools { right:14px; bottom:14px; }
   .stage.focused .view-caption { bottom:13px; }
+  .stage.focused .floor-layer-legend { top:84px; right:14px; }
   .edit-toggle { position:absolute; top:16px; right:16px; z-index:4; padding:7px 11px; border:1px solid #394555; border-radius:7px; background:#1b2431c9; color:#aebbd0; font-size:11px; }
   .edit-toggle:hover { color:#fff; border-color:#617086; }
 
@@ -595,8 +634,13 @@
 .metric-cards small { color:var(--muted); font-size:14px; letter-spacing:0; }
 .metric-cards > div:first-child strong { color:var(--accent); }
 .temperature-scale { position:absolute; bottom:70px; left:28px; width:150px; font-size:10px; color:var(--muted); pointer-events:none; }
+.floor-layer-legend { position:absolute; top:166px; right:28px; z-index:2; display:grid; gap:7px; min-width:185px; padding:11px 13px; border:1px solid #3a475b; border-radius:8px; background:#151d29e8; color:#c5d1e0; font-size:11px; pointer-events:none; }
+.floor-layer-legend strong { margin-bottom:2px; color:#eef4fb; font-size:11px; font-weight:600; }
+.floor-layer-legend span { display:flex; align-items:center; gap:7px; }
+.floor-layer-legend i { width:10px; height:10px; flex:none; border:1px solid #ffffff50; border-radius:2px; }
+.floor-layer-legend b { margin-left:auto; color:#95a6bb; font-size:10px; font-weight:500; }
 .scale-label,.scale-values { display:flex; justify-content:space-between; } .scale-gradient { height:6px; border-radius:4px; margin:7px 0; }
 .view-caption { bottom:30px; } .instructions { bottom:6px; font-size:10px; }
 @media(max-width:1100px) { h2 { font-size:20px; } }
-@media(max-width:600px) { .metric-cards { left:16px; right:16px; top:16px; gap:7px; } .metric-cards > div { padding:12px 10px; } .metric-cards strong { font-size:22px; } .metric-cards span { font-size:8px; letter-spacing:.4px; } .heading { left:16px; top:110px; } .heading .eyebrow { display:none; } .view-tools { right:16px; bottom:58px; } .room { inset:150px 0 90px; } .temperature-scale { left:16px; bottom:58px; width:95px; } .view-caption { bottom:24px; font-size:10px; white-space:nowrap; } .instructions { display:none; } .stage.focused .view-tools { right:8px; bottom:8px; } .stage.focused .heading { left:12px; top:10px; } .edit-toggle { top:10px; right:10px; } }
+@media(max-width:600px) { .metric-cards { left:16px; right:16px; top:16px; gap:7px; } .metric-cards > div { padding:12px 10px; } .metric-cards strong { font-size:22px; } .metric-cards span { font-size:8px; letter-spacing:.4px; } .heading { left:16px; top:110px; } .heading .eyebrow { display:none; } .view-tools { right:16px; bottom:58px; } .room { inset:150px 0 90px; } .temperature-scale { left:16px; bottom:58px; width:95px; } .view-caption { bottom:24px; font-size:10px; white-space:nowrap; } .instructions { display:none; } .stage.focused .view-tools { right:8px; bottom:8px; } .stage.focused .heading { left:12px; top:10px; } .stage.focused .floor-layer-legend { top:72px; right:8px; min-width:155px; } .edit-toggle { top:10px; right:10px; } }
 </style>

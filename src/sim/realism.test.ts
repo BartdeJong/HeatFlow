@@ -6,7 +6,8 @@ import { Simulation } from './simulation';
 
 function isolated(): RoomConfig {
   const r = structuredClone(DEFAULT_ROOM);
-  r.heightM = 2; r.ceilingM = 2; r.convection = false; r.sources = [];
+  r.widthM = 5; r.heightM = 2; r.footprint = undefined; r.interiorWalls = [];
+  r.ceilingM = 2; r.convection = false; r.sources = [];
   r.model = structuredClone(DEFAULT_MODEL);
   r.model.quality = 'coarse'; r.model.radiation = false; r.model.leakageACH = 0;
   r.model.environment.skyOffsetC = 0;

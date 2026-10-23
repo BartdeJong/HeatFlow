@@ -1,4 +1,4 @@
-import type { Furniture } from './config';
+import type { Furniture, RoomConfig } from './config';
 
 export type Point3 = [number, number, number];
 export interface FurnitureBox {
@@ -10,6 +10,34 @@ export interface FurnitureBox {
 
 export function furnitureExtent(f: Furniture): [number, number] {
   return f.rotation === 90 ? [f.depthM, f.widthM] : [f.widthM, f.depthM];
+}
+
+export function interiorWallFurniture(room: Pick<RoomConfig, 'interiorWalls' | 'widthM' | 'heightM' | 'ceilingM'>): Furniture[] {
+  return (room.interiorWalls ?? []).flatMap((wall) => {
+    const horizontal = wall.start.y === wall.end.y;
+    const length = Math.hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y);
+    const widthM = horizontal ? length : wall.thicknessM;
+    const depthM = horizontal ? wall.thicknessM : length;
+    const x = (wall.start.x + wall.end.x) / 2, y = (wall.start.y + wall.end.y) / 2;
+    if (!Number.isFinite(length) || length < 0.1 || !Number.isFinite(wall.thicknessM) || wall.thicknessM <= 0 ||
+      x - widthM / 2 < 0 || x + widthM / 2 > room.widthM ||
+      y - depthM / 2 < 0 || y + depthM / 2 > room.heightM) return [];
+    return [{
+      id: -(Math.max(0, Math.floor(wall.id)) * 100 + 1),
+      kind: 'wall' as const,
+      material: 'masonry' as const,
+      x,
+      y,
+      widthM,
+      depthM,
+      heightM: room.ceilingM,
+      rotation: 0 as const,
+    }];
+  });
+}
+
+export function physicalFurniture(room: RoomConfig): Furniture[] {
+  return [...room.furniture, ...interiorWallFurniture(room)];
 }
 
 /** Identical solid parts are used for physics, drawing, picking, and trail occlusion. */
@@ -45,6 +73,9 @@ export function furnitureBoxes(f: Furniture): FurnitureBox[] {
       box(-0.5, -0.5, 0.5, 0.5, -0.43, 1, 'back');
       break;
     case 'cabinet':
+      box(-0.5, -0.5, 0, 0.5, 0.5, 1, 'body');
+      break;
+    case 'wall':
       box(-0.5, -0.5, 0, 0.5, 0.5, 1, 'body');
       break;
   }

@@ -5,6 +5,7 @@ import {
   nextId,
   sanitizeRoom,
   type HeatSource,
+  type InteriorWall,
   type Furniture,
   type FurnitureKind,
   type Opening,
@@ -15,13 +16,15 @@ import {
   type ThermostatConfig,
   type WallConfig,
 } from '../sim/config';
-import { footprintCellArea, footprintInteriorPoint, nearestFootprintPoint, type FootprintPoint, footprintWalls } from '../sim/footprint';
+import { footprintCellArea, footprintInteriorPoint, isValidFootprint, nearestFootprintPoint, type FootprintPoint, footprintWalls } from '../sim/footprint';
 import { Recorder } from '../sim/recorder';
 import { roomFromHash } from '../persist/share';
 import type { PaletteId } from '../render/palette';
 import { TEMPERATURE_MIN_C, TEMPERATURE_MAX_C } from '../render/temperature-scale';
 import { furnitureExtent, furnitureOverlap } from '../sim/furniture';
 import { getModel, emitterPreset, type ModelConfig } from '../sim/model';
+import { applyInsulationLevel, type InsulationLevel } from '../sim/insulation';
+import { interiorWallBounds, interiorWallPlacementError } from '../sim/interior-walls';
 
 export const SPEEDS = [1, 10, 30, 100, 300, 1000] as const;
 
@@ -80,14 +83,74 @@ export function updateRoom(
   });
 }
 
-export function updateFootprint(footprint: FootprintPoint[]): boolean {
-  const room = sanitizeRoom({ ...$state.snapshot(app.room), footprint: footprint.map((point) => ({ ...point })) });
-  const outsideFurniture = room.furniture.some((f) => {
-    const [width, depth] = furnitureExtent(f);
-    return footprintCellArea(room, f.x - width / 2, f.y - depth / 2, f.x + width / 2, f.y + depth / 2) < width * depth - 1e-8;
+export interface FootprintUpdateOptions {
+  widthM: number;
+  heightM: number;
+  translation: FootprintPoint;
+  openingAnchors?: Record<number, { wallIndex: number; pos: number }>;
+}
+
+export function updateFootprint(footprint: FootprintPoint[], options?: FootprintUpdateOptions): boolean {
+  const original = $state.snapshot(app.room) as RoomConfig;
+  const widthM = options?.widthM ?? original.widthM;
+  const heightM = options?.heightM ?? original.heightM;
+  const translation = options?.translation ?? { x: 0, y: 0 };
+  if (widthM < LIMITS.size.min || widthM > LIMITS.size.max || heightM < LIMITS.size.min || heightM > LIMITS.size.max ||
+    !isValidFootprint(footprint, widthM, heightM)) {
+    app.placementMessage = 'The room outline must stay within the allowed room size and use valid 90° walls.';
+    return false;
+  }
+  const move = (point: FootprintPoint): FootprintPoint => ({ x: point.x + translation.x, y: point.y + translation.y });
+  const shiftedInteriorWalls = (original.interiorWalls ?? []).map((wall) => ({
+    ...wall, start: move(wall.start), end: move(wall.end),
+  }));
+  const outsideFurniture = original.furniture.map((item) => ({
+    ...item, x: item.x + translation.x, y: item.y + translation.y,
+  })).some((item) => {
+    const [width, depth] = furnitureExtent(item);
+    const x0 = item.x - width / 2, y0 = item.y - depth / 2;
+    const x1 = item.x + width / 2, y1 = item.y + depth / 2;
+    return x0 < 0 || y0 < 0 || x1 > widthM || y1 > heightM ||
+      footprintCellArea({ widthM, heightM, footprint }, x0, y0, x1, y1) < width * depth - 1e-8;
   });
   if (outsideFurniture) {
     app.placementMessage = 'Move or remove furniture that would fall outside the new floorplan.';
+    return false;
+  }
+  const wallOutside = shiftedInteriorWalls.some((wall) => {
+    const bounds = interiorWallBounds(wall);
+    const area = (bounds.x1 - bounds.x0) * (bounds.y1 - bounds.y0);
+    return bounds.x0 < 0 || bounds.y0 < 0 || bounds.x1 > widthM || bounds.y1 > heightM ||
+      footprintCellArea({ widthM, heightM, footprint }, bounds.x0, bounds.y0, bounds.x1, bounds.y1) < area - 1e-8;
+  });
+  if (wallOutside) {
+    app.placementMessage = 'Move or remove interior walls that would fall outside the new floorplan.';
+    return false;
+  }
+  const openings = original.openings.map((opening) => ({
+    ...opening,
+    ...(options?.openingAnchors?.[opening.id] === undefined
+      ? {}
+      : options.openingAnchors[opening.id]),
+  }));
+  const room = sanitizeRoom({
+    ...original,
+    widthM,
+    heightM,
+    footprint: footprint.map((point) => ({ ...point })),
+    sources: original.sources.map((source) => ({ ...source, x: source.x + translation.x, y: source.y + translation.y })),
+    probes: original.probes.map((probe) => ({ ...probe, x: probe.x + translation.x, y: probe.y + translation.y })),
+    furniture: original.furniture.map((item) => ({ ...item, x: item.x + translation.x, y: item.y + translation.y })),
+    interiorWalls: shiftedInteriorWalls,
+    openings,
+    thermostat: {
+      ...original.thermostat,
+      ...(original.thermostat.sensor ? { sensor: { ...original.thermostat.sensor,
+        x: original.thermostat.sensor.x + translation.x, y: original.thermostat.sensor.y + translation.y } } : {}),
+    },
+  });
+  if ((room.interiorWalls?.length ?? 0) !== shiftedInteriorWalls.length) {
+    app.placementMessage = 'Move or remove interior walls that would fall outside the new floorplan.';
     return false;
   }
   app.placementMessage = '';
@@ -117,8 +180,50 @@ export function updateRoof(patch: Partial<RoofConfig>): void {
   edit((r) => Object.assign(r.roof, patch));
 }
 
+export function updateInsulationLevel(level: InsulationLevel): void {
+  edit((room) => Object.assign(room, applyInsulationLevel(room, level)));
+}
+
 export function updateThermostat(patch: Partial<ThermostatConfig>): void {
   edit((r) => Object.assign(r.thermostat, patch));
+}
+
+export function addInteriorWall(start: FootprintPoint, end: FootprintPoint): number | null {
+  if ((app.room.interiorWalls?.length ?? 0) >= LIMITS.interiorWalls) {
+    app.placementMessage = 'The room already has the maximum number of interior walls.';
+    return null;
+  }
+  const wall: InteriorWall = { id: nextId(app.room.interiorWalls ?? []), start, end, thicknessM: 0.1 };
+  const error = interiorWallPlacementError(app.room, wall);
+  if (error) {
+    app.placementMessage = error;
+    return null;
+  }
+  edit((room) => { room.interiorWalls = [...(room.interiorWalls ?? []), wall]; });
+  app.placementMessage = '';
+  return wall.id;
+}
+
+export function updateInteriorWall(id: number, patch: Partial<Pick<InteriorWall, 'start' | 'end' | 'thicknessM'>>): boolean {
+  const current = app.room.interiorWalls?.find((wall) => wall.id === id);
+  if (!current) return false;
+  const candidate = { ...current, ...patch };
+  const error = interiorWallPlacementError(app.room, candidate, id);
+  if (error) {
+    app.placementMessage = error;
+    return false;
+  }
+  edit((room) => {
+    const wall = room.interiorWalls?.find((item) => item.id === id);
+    if (wall) Object.assign(wall, patch);
+  });
+  app.placementMessage = '';
+  return true;
+}
+
+export function removeInteriorWall(id: number): void {
+  edit((room) => { room.interiorWalls = (room.interiorWalls ?? []).filter((wall) => wall.id !== id); });
+  app.placementMessage = '';
 }
 
 export function setRoom(room: RoomConfig): void {

@@ -1,5 +1,5 @@
 import type { RoomConfig } from './config';
-import { furnitureBoxes, unionBoxVolume, unionRectangleArea, type FurnitureBox, type Point3 } from './furniture';
+import { furnitureBoxes, physicalFurniture, unionBoxVolume, unionRectangleArea, type FurnitureBox, type Point3 } from './furniture';
 import { footprintCellArea, footprintLineIntervals, footprintRectangles } from './footprint';
 
 /** Exact axis-aligned cut-cell geometry. Volumes remain unmerged for heat accounting. */
@@ -18,9 +18,10 @@ export class GridGeometry {
     const n = nx * ny * nz, cellVolume = this.dx * this.dy * this.dz;
     this.volume = new Float64Array(n); this.solid = new Uint8Array(n);
     this.representative = Int32Array.from({ length: n }, (_, i) => i);
-    this.furnitureVolumes = room.furniture.map(() => new Float64Array(n));
+    const furniture = physicalFurniture(room);
+    this.furnitureVolumes = furniture.map(() => new Float64Array(n));
     const rectangles = footprintRectangles(room);
-    const parts = room.furniture.map((furniture) => clipToFootprint(furnitureBoxes(furniture), rectangles));
+    const parts = furniture.map((item) => clipToFootprint(furnitureBoxes(item), rectangles));
     const boxes = parts.flat();
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const index = this.index(i, j, k);
@@ -50,6 +51,25 @@ export class GridGeometry {
           : footprintFaceLength(room, axis as 0 | 1, plane, axis === 0 ? loA : loB, axis === 0 ? hiA : hiB);
         const open = Math.max(0, baseArea * (axis === 2 ? 1 : this.dz) - unionRectangleArea(rects));
         areas[axis][i + counts[0] * (j + counts[1] * k)] = open < spacings[a] * spacings[b] * 1e-10 ? 0 : open;
+      }
+    }
+    for (const wall of room.interiorWalls ?? []) {
+      if (wall.start.x === wall.end.x) {
+        const faceX = Math.max(0, Math.min(nx, Math.round(wall.start.x / this.dx)));
+        const fromY = Math.min(wall.start.y, wall.end.y), toY = Math.max(wall.start.y, wall.end.y);
+        for (let j = 0; j < ny; j++) {
+          const y0 = j * this.dy, y1 = y0 + this.dy;
+          if (Math.min(y1, toY) <= Math.max(y0, fromY)) continue;
+          for (let k = 0; k < nz; k++) this.openU[this.uIndex(faceX, j, k)] = 0;
+        }
+      } else {
+        const faceY = Math.max(0, Math.min(ny, Math.round(wall.start.y / this.dy)));
+        const fromX = Math.min(wall.start.x, wall.end.x), toX = Math.max(wall.start.x, wall.end.x);
+        for (let i = 0; i < nx; i++) {
+          const x0 = i * this.dx, x1 = x0 + this.dx;
+          if (Math.min(x1, toX) <= Math.max(x0, fromX)) continue;
+          for (let k = 0; k < nz; k++) this.openV[this.vIndex(i, faceY, k)] = 0;
+        }
       }
     }
     // Union tiny cells only through an actually open face; never connect isolated pockets.

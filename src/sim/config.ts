@@ -8,8 +8,8 @@ export type SourceKind = 'heat' | 'cold' | 'fan';
 export type HeatingMode = 'point' | 'underfloor';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
-export type FurnitureKind = 'sofa' | 'table' | 'cabinet' | 'bed';
-export type FurnitureMaterial = 'wood' | 'fabric' | 'metal';
+export type FurnitureKind = 'sofa' | 'table' | 'cabinet' | 'bed' | 'wall';
+export type FurnitureMaterial = 'wood' | 'fabric' | 'metal' | 'masonry';
 
 export interface Furniture {
   id: number;
@@ -29,6 +29,7 @@ export const FURNITURE_MATERIALS: ReadonlyArray<{ id: FurnitureMaterial; label: 
   { id: 'wood', label: 'Wood', k: 0.15, capacity: 650_000, h: 4 },
   { id: 'fabric', label: 'Upholstery', k: 0.06, capacity: 100_000, h: 3 },
   { id: 'metal', label: 'Metal', k: 12, capacity: 1_800_000, h: 6 },
+  { id: 'masonry', label: 'Masonry', k: 0.77, capacity: 1_512_000, h: 6 },
 ];
 
 export const FURNITURE_PRESETS: ReadonlyArray<{ id: FurnitureKind; label: string; widthM: number; depthM: number; heightM: number; material: FurnitureMaterial }> = [
@@ -97,6 +98,13 @@ export interface Probe {
   z: number;
 }
 
+export interface InteriorWall {
+  id: number;
+  start: FootprintPoint;
+  end: FootprintPoint;
+  thicknessM: number;
+}
+
 export interface CeilingFanConfig {
   /** Downward air speed under the fan, m/s. */
   speedMps: number;
@@ -124,6 +132,7 @@ export interface RoomConfig {
   openings: Opening[];
   probes: Probe[];
   furniture: Furniture[];
+  interiorWalls?: InteriorWall[];
   model?: ModelConfig;
 }
 
@@ -199,7 +208,7 @@ export const OPENING_U: Record<OpeningKind, { closed: number; open: number }> = 
 };
 
 export const LIMITS = {
-  size: { min: 2, max: 10, step: 0.1 },
+  size: { min: 2, max: 15, step: 0.1 },
   outside: { min: -30, max: 40, step: 1 },
   power: { min: 0, max: 10, step: 0.1 },
   thickness: { min: 0.05, max: 0.5, step: 0.01 },
@@ -211,6 +220,7 @@ export const LIMITS = {
   openingLength: { min: 0.3, step: 0.1 },
   sources: 8,
   openings: 8,
+  interiorWalls: 96,
   probes: 3,
   furniture: 8,
 } as const;
@@ -234,11 +244,18 @@ export const DEFAULT_THERMOSTAT: ThermostatConfig = {
 export const DEFAULT_CEILING_FAN: CeilingFanConfig = { speedMps: 1.2, diameterM: 1.2 };
 
 export const DEFAULT_ROOM: RoomConfig = {
-  widthM: 5,
-  heightM: 4,
+  widthM: 12.68,
+  heightM: 8.99,
   footprint: [
-    { x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 2 },
-    { x: 3.75, y: 2 }, { x: 3.75, y: 4 }, { x: 0, y: 4 },
+    { x: 0, y: 0 }, { x: 4.43, y: 0 }, { x: 4.43, y: 2.31 },
+    { x: 4.97, y: 2.31 }, { x: 4.97, y: 3.03 }, { x: 5.71, y: 3.03 },
+    { x: 5.71, y: 2.31 }, { x: 12.68, y: 2.31 }, { x: 12.68, y: 7 },
+    { x: 9.94, y: 7 }, { x: 9.94, y: 8.99 }, { x: 5.43, y: 8.99 },
+    { x: 5.43, y: 7 }, { x: 0, y: 7 },
+  ],
+  interiorWalls: [
+    { id: 1, start: { x: 9.94, y: 2.31 }, end: { x: 9.94, y: 4.13 }, thicknessM: 0.14 },
+    { id: 2, start: { x: 9.94, y: 6.01 }, end: { x: 9.94, y: 7 }, thicknessM: 0.14 },
   ],
   ceilingM: 2.5,
   outsideC: 0,
@@ -419,7 +436,8 @@ function sanitizeThermostat(t: Partial<ThermostatConfig> | undefined, widthM: nu
 
 /** Clamp every value into its valid range and drop malformed entries. Accepts untrusted input. */
 export function sanitizeRoom(
-  c: Partial<Omit<RoomConfig, 'roof' | 'thermostat'>> & {
+  c: Partial<Omit<RoomConfig, 'roof' | 'thermostat' | 'interiorWalls'>> & {
+    interiorWalls?: unknown;
     roof?: Partial<RoofConfig>;
     thermostat?: Partial<ThermostatConfig>;
     /** Read legacy WIP room saves where the fan was stored outside sources. */
@@ -431,6 +449,38 @@ export function sanitizeRoom(
   const footprint = isValidFootprint(c.footprint, widthM, heightM)
     ? c.footprint.map((point) => ({ x: point.x, y: point.y }))
     : undefined;
+  const interiorWalls = withIds((Array.isArray(c.interiorWalls) ? c.interiorWalls : [])
+    .slice(0, LIMITS.interiorWalls)
+    .flatMap((value): InteriorWall[] => {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return [];
+      const wall = value as Record<string, unknown>;
+      const thicknessM = clamp(wall.thicknessM, 0.05, 0.5);
+      const id = Number.isInteger(wall.id) ? wall.id as number : 0;
+      const toWall = (startX: unknown, startY: unknown, endX: unknown, endY: unknown): InteriorWall[] => {
+        const horizontal = startY === endY;
+        if (typeof startX !== 'number' || typeof startY !== 'number' || typeof endX !== 'number' || typeof endY !== 'number' ||
+          ![startX, startY, endX, endY].every(Number.isFinite) ||
+          (startX === endX) === (startY === endY) ||
+          Math.hypot(endX - startX, endY - startY) < 0.1) return [];
+        if (horizontal
+          ? startY < thicknessM / 2 || startY > heightM - thicknessM / 2 ||
+            startX < 0 || startX > widthM || endX < 0 || endX > widthM
+          : startX < thicknessM / 2 || startX > widthM - thicknessM / 2 || startY < 0 || startY > heightM ||
+            endX < thicknessM / 2 || endX > widthM - thicknessM / 2 || endY < 0 || endY > heightM) return [];
+        return [{ id, start: { x: startX, y: startY }, end: { x: endX, y: endY }, thicknessM }];
+      };
+      if (wall.start !== null && typeof wall.start === 'object' && wall.end !== null && typeof wall.end === 'object') {
+        const start = wall.start as Record<string, unknown>, end = wall.end as Record<string, unknown>;
+        return toWall(start.x, start.y, end.x, end.y);
+      }
+      if (typeof wall.x !== 'number' || !Number.isFinite(wall.x) ||
+        !Array.isArray(wall.segments) || wall.x < thicknessM / 2 || wall.x > widthM - thicknessM / 2) return [];
+      return wall.segments.slice(0, 12).flatMap((segment): InteriorWall[] => {
+        if (segment === null || typeof segment !== 'object' || Array.isArray(segment)) return [];
+        const legacySegment = segment as Record<string, unknown>;
+        return toWall(wall.x, legacySegment.fromY, wall.x, legacySegment.toY);
+      });
+    }).slice(0, LIMITS.interiorWalls));
   const ceilingM = clamp(c.ceilingM ?? DEFAULT_ROOM.ceilingM, LIMITS.size.min, LIMITS.size.max);
   const outsideC = clamp(c.outsideC ?? DEFAULT_ROOM.outsideC, LIMITS.outside.min, LIMITS.outside.max);
 
@@ -542,6 +592,7 @@ export function sanitizeRoom(
     sources,
     openings,
     probes,
+    interiorWalls,
   };
 }
 

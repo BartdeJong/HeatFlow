@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_PHYSICS, DEFAULT_ROOM, sanitizeRoom, type Furniture, type RoomConfig } from './config';
-import { furnitureBoxes, intersectBox } from './furniture';
+import { furnitureBoxes, interiorWallFurniture, intersectBox } from './furniture';
 import { Simulation } from './simulation';
 import { traceAirflow } from '../render/airflow';
 import { DEFAULT_MODEL } from './model';
 
 const table: Furniture = { id: 1, kind: 'table', material: 'wood', x: 2.5, y: 2, widthM: 1.6, depthM: 1.2, heightM: 1.25, rotation: 0 };
-const room = (patch: Partial<RoomConfig> = {}) => sanitizeRoom({ ...DEFAULT_ROOM, convection: true, outsideC: 20, furniture: [table],
+const room = (patch: Partial<RoomConfig> = {}) => sanitizeRoom({ ...DEFAULT_ROOM, widthM: 5, heightM: 4, footprint: undefined,
+  interiorWalls: [], convection: true, outsideC: 20, furniture: [table],
   model: { ...DEFAULT_MODEL, quality: 'coarse', radiation: false, leakageACH: 0, floor: { ...DEFAULT_MODEL.floor, temperatureC: 20 } },
   sources: DEFAULT_ROOM.sources.map(({ emitter: _emitter, ...source }) => source), ...patch });
 const advance = (sim: Simulation, seconds: number) => {
@@ -17,6 +18,30 @@ const advance = (sim: Simulation, seconds: number) => {
 };
 
 describe('furniture physics', () => {
+  it('blocks airflow at the default divider while preserving its passage', () => {
+    const config = sanitizeRoom({ ...DEFAULT_ROOM, furniture: [] });
+    const walls = interiorWallFurniture(config);
+    expect(walls).toHaveLength(2);
+    const sim = new Simulation(config);
+    expect(sim.isSolid(9.94, 3, 1)).toBe(true);
+    expect(sim.isSolid(9.94, 5, 1)).toBe(false);
+    expect(sim.isSolid(9.94, 6.5, 1)).toBe(true);
+    const wallFace = Math.round(9.94 / sim.dx);
+    expect(sim.grid.openU[sim.grid.uIndex(wallFace, Math.floor(3 / sim.dy), 0)]).toBe(0);
+    expect(sim.grid.openU[sim.grid.uIndex(wallFace, Math.floor(5 / sim.dy), 0)]).toBeGreaterThan(0);
+    expect(sim.sample(9.94, 3, 1)).toBe(sim.furnitureTemperatures()[walls[0].id]);
+  });
+
+  it('blocks airflow across horizontal interior walls', () => {
+    const sim = new Simulation(room({
+      furniture: [],
+      interiorWalls: [{ id: 1, start: { x: 1, y: 2 }, end: { x: 4, y: 2 }, thicknessM: 0.1 }],
+    }));
+    const faceY = Math.round(2 / sim.dy);
+    expect(sim.grid.openV[sim.grid.vIndex(Math.floor(2.5 / sim.dx), faceY, Math.floor(1 / sim.dz))]).toBe(0);
+    expect(sim.isSolid(2.5, 2, 1)).toBe(true);
+  });
+
   it('keeps open space under a table and blocks airflow through its top and legs', () => {
     const sim = new Simulation(room());
     expect(sim.isSolid(2.5, 2, 0.5)).toBe(false);
@@ -84,7 +109,8 @@ describe('furniture physics', () => {
 
 describe('furniture geometry and validation', () => {
   it('validates furniture defaults, unique IDs, dimensions and item limits', () => {
-    const r = sanitizeRoom({ ...DEFAULT_ROOM, furniture: Array.from({ length: 20 }, () => ({ ...table,
+    const r = sanitizeRoom({ ...DEFAULT_ROOM, widthM: 5, heightM: 4, footprint: undefined, interiorWalls: [],
+      furniture: Array.from({ length: 20 }, () => ({ ...table,
       id: 1, kind: 'invalid' as never, material: 'invalid' as never, x: NaN, y: Infinity, widthM: -5, depthM: 99, heightM: 99 })) });
     expect(r.furniture).toHaveLength(8);
     expect(new Set(r.furniture.map((f) => f.id)).size).toBe(8);

@@ -44,7 +44,7 @@ describe('physical model configuration and migration', () => {
     const room = sanitizeRoom({ ...DEFAULT_ROOM, model: { ...structuredClone(DEFAULT_MODEL), wallLayers: [{ label: 'Custom', thicknessM: 0.12, k: 0.15, density: 500, cp: 1500 }] },
       thermostat: { ...DEFAULT_ROOM.thermostat, sensor: { mode: 'point', x: 500, y: -1, z: 500, lagSeconds: -5 } } });
     expect(wallLayers(room)[0].label).toBe('Custom');
-    expect(room.thermostat.sensor).toMatchObject({ x: 5, y: 0, z: 2.5, lagSeconds: 0 });
+    expect(room.thermostat.sensor).toMatchObject({ x: 12.68, y: 0, z: 2.5, lagSeconds: 0 });
     expect(sanitizeRoom(room)).toEqual(room);
   });
   it('uses independent floor boundary in the steady heating estimate', () => {

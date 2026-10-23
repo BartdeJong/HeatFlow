@@ -1,6 +1,6 @@
 import type { RoomConfig } from './config';
 import { fieldVectors, trilerp, weightedTrilerp, type AirStats, type SimulationField, type Vec3 } from './field';
-import { furnitureBoxes, type FurnitureBox } from './furniture';
+import { furnitureBoxes, physicalFurniture, type FurnitureBox } from './furniture';
 import { geometryKey, snapshotBuffers, type SimulationSnapshot, type WorkerCommand } from './protocol';
 import { footprintContains } from './footprint';
 export type { SimulationSnapshot } from './protocol';
@@ -17,7 +17,7 @@ export class SnapshotField implements SimulationField {
     const old = [this.T, this.solid, this.volume, this.u, this.v, this.w].map(a => a.buffer as ArrayBuffer);
     const { nx, ny, nz, dx, dy, dz, T, solid, volume, u, v, w, elapsed, generation } = snapshot;
     Object.assign(this, { nx, ny, nz, dx, dy, dz, T, solid, volume, u, v, w, elapsed, generation });
-    this.boxes = room.furniture.flatMap(furnitureBoxes);
+    this.boxes = physicalFurniture(room).flatMap(furnitureBoxes);
     this.room = room;
     this.furnitureTemps = snapshot.furnitureTemps;
     return old;

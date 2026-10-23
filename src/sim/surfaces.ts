@@ -1,6 +1,6 @@
 import { getOpeningWallIndex, wallRegions, type RoomConfig } from './config';
 import { floorLayers, roofLayers, wallLayers, getEmitter, type ThermalLayer } from './model';
-import { furnitureBoxes, type Point3 } from './furniture';
+import { furnitureBoxes, physicalFurniture, type Point3 } from './furniture';
 import { LayerColumn } from './thermal';
 import type { RadiationPatch } from './radiation';
 import { footprintRectangles, footprintWalls } from './footprint';
@@ -55,7 +55,7 @@ export function buildSurfaces(room: RoomConfig, initialC: number): Surface[] {
     }
   }
   // Partition part faces at all intersections and discard hidden/internal rectangles.
-  room.furniture.forEach((f, item) => {
+  physicalFurniture(room).forEach((f, item) => {
     const boxes = furnitureBoxes(f);
     boxes.forEach((box, part) => { for (let axis = 0; axis < 3; axis++) for (const sign of [-1, 1]) {
       const other = [0, 1, 2].filter(a => a !== axis), a = other[0], b = other[1], plane = sign < 0 ? box.min[axis] : box.max[axis];
@@ -68,7 +68,8 @@ export function buildSurfaces(room: RoomConfig, initialC: number): Surface[] {
         if (boxes.some(q => p.every((v, d) => v > q.min[d] && v < q.max[d]))) continue;
         // Ground-contact faces have no room-facing radiation/convection.
         if (axis === 2 && sign < 0 && plane === 0) continue;
-        rectangle(`f${f.id}:${part}:${axis}:${sign}:${i}:${j}`, `${f.kind} ${f.id}`, 'furniture', min, max, normal, undefined, item, undefined, f.material === 'metal' ? .3 : .9);
+        rectangle(`f${f.id}:${part}:${axis}:${sign}:${i}:${j}`, f.kind === 'wall' ? 'Interior wall' : `${f.kind} ${f.id}`,
+          'furniture', min, max, normal, undefined, item, undefined, f.material === 'metal' ? .3 : .9);
       }
     } });
   });

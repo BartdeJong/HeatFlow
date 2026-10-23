@@ -123,12 +123,12 @@ describe('config helpers', () => {
       ],
       openings: [{ id: 1, kind: 'door', side: 'left', pos: 100, length: 100, heightM: 100, sillM: 100, open: true }],
     });
-    expect(c.widthM).toBe(10);
+    expect(c.widthM).toBe(15);
     expect(c.heightM).toBe(2);
     expect(c.wall.material).toBe('brick');
     expect(c.wall.thicknessM).toBe(0.5);
     expect(c.wall.insulationM).toBe(0);
-    expect(c.sources[0]).toMatchObject({ x: 10, y: 0, z: c.ceilingM, powerKW: 0 });
+    expect(c.sources[0]).toMatchObject({ x: 15, y: 0, z: c.ceilingM, powerKW: 0 });
     expect(c.sources[1]).toMatchObject({ kind: 'heat', powerKW: 10 });
     expect(new Set(c.sources.map((s) => s.id)).size).toBe(2);
     const o = c.openings[0];

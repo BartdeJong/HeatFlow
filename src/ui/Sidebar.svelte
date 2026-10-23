@@ -1,7 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import {
-    addOpening,
     addProbe,
     addSource,
     app,
@@ -24,20 +23,20 @@
     WALL_MATERIALS,
     holdPowerKW,
     roofU,
-    wallLength,
     wallU,
     type InsulationId,
     type HeatingMode,
     type RoofMaterialId,
     type WallMaterialId,
   } from '../sim/config';
-  import { footprintWalls } from '../sim/footprint';
   import { PALETTES, PALETTE_IDS } from '../render/palette';
   import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, gradientOpacityValue } from '../render/temperature-scale';
   import Graph from './Graph.svelte';
   import FurniturePanel from './FurniturePanel.svelte';
   import PhysicsPanel from './PhysicsPanel.svelte';
   import FloorplanEditor from './FloorplanEditor.svelte';
+  import SimpleComfort from './SimpleComfort.svelte';
+  import SimpleRoomPlan from './SimpleRoomPlan.svelte';
 
   let holdMsg = $state('');
 
@@ -68,13 +67,14 @@
   const fanRunning = $derived(app.room.sources.some((s) => s.kind === 'fan' && s.fanEnabled !== false));
   const selectedProbe = $derived(app.selection?.kind === 'probe' ? app.room.probes.find((p) => p.id === app.selection!.id) : undefined);
   const sliceLength = $derived(app.sliceAxis === 'x' ? app.room.widthM : app.sliceAxis === 'y' ? app.room.heightM : app.room.ceilingM);
-  const roomWalls = $derived(footprintWalls(app.room));
-
   const tabs = ['Setup', 'Climate', 'Display', 'Results'] as const;
+  const simpleTabs = ['Room plan', 'Comfort'] as const;
   let active = $state<(typeof tabs)[number]>('Setup');
+  let simpleMode = $state(false);
+  let simpleActive = $state<(typeof simpleTabs)[number]>('Room plan');
   $effect(() => {
     const selection = app.selection;
-    if (!selection) return;
+    if (!selection || simpleMode) return;
     const tab = selection.kind === 'probe' ? 'Results' : 'Setup';
     active = tab;
     let cancelled = false;
@@ -96,6 +96,19 @@
     active = tabs[next];
     document.getElementById(`tab-${active}`)?.focus();
   }
+  function simpleTabKey(event: KeyboardEvent, index: number) {
+    const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    if (!delta && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? simpleTabs.length - 1 : (index + delta + simpleTabs.length) % simpleTabs.length;
+    simpleActive = simpleTabs[next];
+    document.getElementById(`simple-tab-${simpleActive}`)?.focus();
+  }
+  function showSimpleMode() {
+    simpleMode = true;
+    simpleActive = 'Room plan';
+    if (!app.room.convection) updateRoom({ convection: true });
+  }
   function fmtPower(w: number): string {
     return Math.abs(w) >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${w.toFixed(0)} W`;
   }
@@ -113,7 +126,30 @@
 {/snippet}
 
 <aside class="sidebar" aria-label="Room inspector">
-<div class="inspector-heading"><span>ROOM INSPECTOR</span><span class="inspector-badge">3D</span></div>
+<div class="inspector-heading">
+  <span>{simpleMode ? 'SIMPLE VIEW' : 'ADVANCED VIEW'}</span>
+  <div class="mode-switch" role="group" aria-label="Inspector mode">
+    <button aria-pressed={!simpleMode} onclick={() => simpleMode = false}>Advanced</button>
+    <button aria-pressed={simpleMode} onclick={showSimpleMode}>Simple</button>
+  </div>
+</div>
+{#if simpleMode}
+<div class="tabs simple-tabs" role="tablist" aria-label="Simple settings">
+  {#each simpleTabs as tab, index}
+    <button id="simple-tab-{tab.replace(' ', '-')}" role="tab" aria-selected={simpleActive === tab}
+      aria-controls="simple-panel-{tab.replace(' ', '-')}" tabindex={simpleActive === tab ? 0 : -1}
+      onclick={() => simpleActive = tab} onkeydown={(event) => simpleTabKey(event, index)}>{tab}</button>
+  {/each}
+</div>
+<div class="inspector-content" id="simple-panel-Room-plan" role="tabpanel" aria-labelledby="simple-tab-Room-plan"
+  tabindex="0" hidden={simpleActive !== 'Room plan'}>
+  <SimpleRoomPlan />
+</div>
+<div class="inspector-content" id="simple-panel-Comfort" role="tabpanel" aria-labelledby="simple-tab-Comfort"
+  tabindex="0" hidden={simpleActive !== 'Comfort'}>
+  <SimpleComfort />
+</div>
+{:else}
 <div class="tabs" role="tablist" aria-label="Settings sections">
 {#each tabs as tab, index}<button id="tab-{tab}" role="tab" aria-selected={active === tab} aria-controls="panel-{tab}" tabindex={active === tab ? 0 : -1} onclick={() => active = tab} onkeydown={(e) => tabKey(e, index)}>{tab}</button>{/each}
 </div>
@@ -244,16 +280,7 @@
 <div id="inspect-furniture"><FurniturePanel /></div>
   <fieldset id="inspect-opening">
     <legend>Windows &amp; doors</legend>
-    <div class="row">
-      <button onclick={() => addOpening('window')} disabled={app.room.openings.length >= LIMITS.openings}>
-        + Window
-      </button>
-      <button onclick={() => addOpening('door')} disabled={app.room.openings.length >= LIMITS.openings}>
-        + Door
-      </button>
-    </div>
     {#each app.room.openings as o (o.id)}
-      {@const len = wallLength(app.room, o.wallIndex ?? o.side)}
       <div class="opening" class:sel={app.selection?.kind === 'opening' && app.selection.id === o.id}>
         <div class="row">
           <button class="item" onclick={() => select({ kind: 'opening', id: o.id })}>
@@ -270,29 +297,6 @@
         </div>
         {#if o.kind === 'window'}<label>Solar transmittance<input type="number" min="0" max="1" step="0.05" value={o.solarTransmittance ?? 0.6} onchange={(e) => updateOpening(o.id, { solarTransmittance: e.currentTarget.valueAsNumber })} /></label>{/if}
         <label>
-          Wall
-          <select
-            value={o.wallIndex ?? 0}
-            onchange={(e) => {
-              const wall = roomWalls[Number(e.currentTarget.value)];
-              if (wall) updateOpening(o.id, { wallIndex: wall.index, side: wall.side ?? 'top' });
-            }}
-          >
-            {#each roomWalls as wall}<option value={wall.index}>{wall.side ? wall.side[0].toUpperCase() + wall.side.slice(1) : `Wall ${wall.index + 1}`}</option>{/each}
-          </select>
-        </label>
-        <label>
-          <span>Position <output>{o.pos.toFixed(1)} m</output></span>
-          <input
-            type="range"
-            min="0"
-            max={len}
-            step="0.1"
-            value={o.pos}
-            oninput={(e) => updateOpening(o.id, { pos: e.currentTarget.valueAsNumber })}
-          />
-        </label>
-        <label>
           <span>Opening height <output>{o.heightM.toFixed(1)} m</output></span>
           <input type="range" min="0.3" max={app.room.ceilingM} step="0.1" value={o.heightM}
             oninput={(e) => updateOpening(o.id, { heightM: e.currentTarget.valueAsNumber })} />
@@ -302,20 +306,9 @@
           <input type="range" min="0" max={app.room.ceilingM - o.heightM} step="0.1" value={o.sillM}
             oninput={(e) => updateOpening(o.id, { sillM: e.currentTarget.valueAsNumber })} />
         </label>
-        <label>
-          <span>Width <output>{o.length.toFixed(1)} m</output></span>
-          <input
-            type="range"
-            min={LIMITS.openingLength.min}
-            max={Math.max(LIMITS.openingLength.min, len - 0.2)}
-            step={LIMITS.openingLength.step}
-            value={o.length}
-            oninput={(e) => updateOpening(o.id, { length: e.currentTarget.valueAsNumber })}
-          />
-        </label>
       </div>
     {/each}
-    <p class="hint">Windows and doors can sit in any vertical wall. Click one on the wall to open or close it. Open ones lose a lot of heat.</p>
+    <p class="hint">Move and resize openings directly on the floorplan map. Set their height, sill, and solar transmittance here.</p>
   </fieldset>
 </div>
 <div class="inspector-content" id="panel-Climate" role="tabpanel" aria-labelledby="tab-Climate" tabindex="0" hidden={active !== 'Climate'}>
@@ -571,6 +564,7 @@
   </fieldset>
 <PhysicsPanel section="diagnostics" />
 </div>
+{/if}
 </aside>
 <style>
 
@@ -685,8 +679,11 @@
   }
 
 .inspector-heading { display:flex; justify-content:space-between; align-items:center; padding:22px 20px 18px; color:var(--muted); font-size:10px; letter-spacing:1.5px; }
-.inspector-badge { border:1px solid var(--border); border-radius:4px; padding:3px 5px; color:var(--accent); }
+.mode-switch { display:flex; gap:2px; padding:2px; border:1px solid var(--border); border-radius:7px; background:var(--background); }
+.mode-switch button { min-height:28px; padding:4px 8px; border:0; background:transparent; color:var(--muted); font-size:10px; letter-spacing:0; }
+.mode-switch button[aria-pressed='true'] { background:var(--surface-raised); color:var(--text); }
 .tabs { display:grid; grid-template-columns:repeat(4,1fr); padding:0 16px; border-bottom:1px solid var(--border); }
+.tabs.simple-tabs { grid-template-columns:repeat(2,1fr); }
 .tabs button { border:0; border-radius:0; background:transparent; color:var(--muted); font-size:12px; padding:12px 4px; border-bottom:2px solid transparent; }
 .tabs button[aria-selected='true'] { border-bottom-color:var(--accent); color:var(--text); }
 .inspector-content { overflow-y:auto; min-height:0; padding:20px 16px; display:flex; flex-direction:column; gap:20px; }

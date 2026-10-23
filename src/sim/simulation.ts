@@ -6,7 +6,7 @@ import { solveVentilation } from './ventilation';
 import { buildSurfaces, type Surface, type SurfaceKind } from './surfaces';
 import { RadiationEnclosure, type RadiationPatch } from './radiation';
 import { getEnvironment, traceSolar, exteriorConvection, exteriorLongwaveW } from './environment';
-import { furnitureBoxes, furnitureOverlaps, unionRectangleArea, type Point3 } from './furniture';
+import { furnitureBoxes, furnitureOverlaps, physicalFurniture, unionRectangleArea, type Point3 } from './furniture';
 import { fieldVectors, trilerp, weightedTrilerp, type SimulationField } from './field';
 import { footprintContains, polygonArea, roomFootprint, footprintWalls } from './footprint';
 export { trilerp } from './field';
@@ -37,6 +37,7 @@ export class Simulation implements SimulationField {
   readonly dt = 1;
   elapsed = 0;
   private room: RoomConfig;
+  private solidFurniture: ReturnType<typeof physicalFurniture> = [];
   private boxes: ReturnType<typeof furnitureBoxes>[] = [];
   private capacity: Float64Array;
   private groupCapacity: Float64Array;
@@ -73,8 +74,9 @@ export class Simulation implements SimulationField {
   }
 
   constructor(room: RoomConfig, params: PhysicsParams = DEFAULT_PHYSICS) {
-    if (furnitureOverlaps(room.furniture).length) throw new Error('Furniture overlaps: move or remove the highlighted pieces before starting.');
-    this.room = room; this.boxes = room.furniture.map(furnitureBoxes); this.params = params; this.convection = room.convection;
+    this.solidFurniture = physicalFurniture(room);
+    if (furnitureOverlaps(this.solidFurniture).length) throw new Error('Furniture overlaps: move or remove the highlighted pieces before starting.');
+    this.room = room; this.boxes = this.solidFurniture.map(furnitureBoxes); this.params = params; this.convection = room.convection;
     const cells = { fast: 8, coarse: 24, balanced: 32, fine: 48 }[getModel(room).quality];
     const spacing = Math.max(room.widthM, room.heightM, room.ceilingM) / cells;
     this.nx = Math.max(2, Math.round(room.widthM / spacing)); this.ny = Math.max(2, Math.round(room.heightM / spacing)); this.nz = Math.max(2, Math.round(room.ceilingM / spacing));
@@ -95,7 +97,7 @@ export class Simulation implements SimulationField {
       if (y + 1 < this.ny) this.addFace(a, a + this.nx, 1, this.grid.vIndex(x, y + 1, z), this.grid.openV, this.dy);
       if (z + 1 < this.nz) this.addFace(a, a + this.nx * this.ny, 2, this.grid.wIndex(x, y, z + 1), this.grid.openW, this.dz);
     }
-    this.furniture = room.furniture.map((f, j) => ({ temperature: params.initialC,
+    this.furniture = this.solidFurniture.map((f, j) => ({ temperature: params.initialC,
       capacity: this.grid.furnitureVolumes[j].reduce((s, v) => s + v, 0) * FURNITURE_MATERIALS.find(m => m.id === f.material)!.capacity }));
     this.emitters = room.sources.map(s => ({ temperature: params.initialC, capacity: getEmitter(s).capacityJPerK }));
     this.sensorC = params.initialC; this.lastEnvironment = getEnvironment(room, 0);
@@ -126,7 +128,10 @@ export class Simulation implements SimulationField {
         const loA = Math.max(surface.min[a], i * spacing[a]), hiA = Math.min(surface.max[a], (i + 1) * spacing[a]);
         const loB = Math.max(surface.min[b], j * spacing[b]), hiB = Math.min(surface.max[b], (j + 1) * spacing[b]);
         const area = (hiA - loA) * (hiB - loB); if (area <= 0) continue;
-        const p = [...surface.center]; p[a] = (loA + hiA) / 2; p[b] = (loB + hiB) / 2; p[axis] += normal[axis] * 1e-6;
+        const p = [...surface.center]; p[a] = (loA + hiA) / 2; p[b] = (loB + hiB) / 2;
+        if (axis === 0 && surface.kind === 'furniture' && this.solidFurniture[surface.item!].kind === 'wall')
+          p[axis] = Math.round(this.solidFurniture[surface.item!].x / spacing[axis]) * spacing[axis] + normal[axis] * 1e-6;
+        else p[axis] += normal[axis] * 1e-6;
         const cell = this.grid.representative[this.nearestAir(p)]; weights.set(cell, (weights.get(cell) ?? 0) + area);
       }
     const total = [...weights.values()].reduce((s, w) => s + w, 0);
@@ -137,6 +142,8 @@ export class Simulation implements SimulationField {
     const oldSources = new Map(this.room.sources.map((s, i) => [s.id, this.emitters[i]]));
     this.emitters = room.sources.map(s => ({ temperature: oldSources.get(s.id)?.temperature ?? this.params.initialC, capacity: getEmitter(s).capacityJPerK }));
     this.room = room;
+    this.solidFurniture = physicalFurniture(room);
+    this.boxes = this.solidFurniture.map(furnitureBoxes);
     this.sources = room.sources.map(s => {
       const radius = .25, entries: number[] = [];
       for (let i = 0; i < this.T.length; i++) if (this.capacity[i] && this.center(i).reduce((sum, n, a) => sum + (n - [s.x, s.y, s.z][a]) ** 2, 0) <= radius ** 2) entries.push(i);
@@ -145,7 +152,8 @@ export class Simulation implements SimulationField {
       return { cells: Int32Array.from(entries), weights: Float64Array.from(entries, i => this.capacity[i] / total) };
     });
     const thermalSources = room.sources.filter(s => s.kind !== 'fan');
-    const key = JSON.stringify([room.footprint, room.openings, room.wall, room.roof, room.model?.floor, room.model?.wallLayers, room.model?.roofLayers, thermalSources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
+    const key = JSON.stringify([room.footprint, room.interiorWalls, room.openings, room.wall, room.roof, room.model?.floor,
+      room.model?.wallLayers, room.model?.roofLayers, thermalSources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
     if (key !== this.surfaceKey) {
       const previous = new Map(this.surfaces.map(s => [s.id, s]));
       this.surfaces = buildSurfaces(room, this.params.initialC);
@@ -173,7 +181,7 @@ export class Simulation implements SimulationField {
       const axis = s.normal.findIndex(n => n !== 0); center[axis] = s.normal[axis] > 0 ? Math.max(...group.map(i => this.surfaces[i].center[axis])) : Math.min(...group.map(i => this.surfaces[i].center[axis]));
       return { area, center, normal: s.normal, emissivity: s.emissivity };
     });
-    this.radiation = patches.length > 1 ? new RadiationEnclosure(patches, this.room.furniture.flatMap(furnitureBoxes)) : undefined;
+    this.radiation = patches.length > 1 ? new RadiationEnclosure(patches, this.solidFurniture.flatMap(furnitureBoxes)) : undefined;
   }
   private contactState(contact: Contact) {
     let capacity = 0, energy = 0;
@@ -356,7 +364,7 @@ export class Simulation implements SimulationField {
       const exchanges = this.radiation.exchange(temps);
       this.radiationGroups.forEach((group, j) => { const area = group.reduce((sum, i) => sum + this.surfaces[i].area, 0); for (const i of group) radiationW[i] = exchanges[j] * this.surfaces[i].area / area; });
     }
-    for (const [id, watts] of solar.furnitureW) { const j = this.room.furniture.findIndex(f => f.id === id); if (j >= 0 && this.furniture[j].capacity) this.furniture[j].temperature += watts * dt / this.furniture[j].capacity; }
+    for (const [id, watts] of solar.furnitureW) { const j = this.solidFurniture.findIndex(f => f.id === id); if (j >= 0 && this.furniture[j].capacity) this.furniture[j].temperature += watts * dt / this.furniture[j].capacity; }
     this.externalJ += this.solarW * dt; this.exchangedJ += Math.abs(this.solarW * dt);
     const floorArea = polygonArea(roomFootprint(this.room));
     for (let j = 0; j < this.surfaces.length; j++) {
@@ -400,7 +408,7 @@ export class Simulation implements SimulationField {
         if (!(lump.capacity > 0)) continue;
         // Two-lump backward Euler exchange, exact equal-and-opposite energy.
         lump.temperature += (radiation + sunlight) * dt / lump.capacity;
-        const material = surface.kind === 'furniture' ? FURNITURE_MATERIALS.find(m => m.id === this.room.furniture[surface.item!].material)! : undefined;
+        const material = surface.kind === 'furniture' ? FURNITURE_MATERIALS.find(m => m.id === this.solidFurniture[surface.item!].material)! : undefined;
         const conductance = surface.area / (1 / h + (material ? .02 / material.k : 0));
         let effectiveG = 0, effectiveGT = 0;
         const responses = Float64Array.from(contact.cells, (i, n) => {
@@ -513,7 +521,7 @@ export class Simulation implements SimulationField {
   wallLossW(): number { return this.loss.totalW; }
   energyUseKWh() { return { heating: this.heatingJ / 3_600_000, cooling: this.coolingJ / 3_600_000 }; }
   thermostatHeatingOn() { return this.thermostatHeating; }
-  furnitureTemperatures(): Record<number, number> { return Object.fromEntries(this.room.furniture.map((f, i) => [f.id, this.furniture[i].temperature])); }
+  furnitureTemperatures(): Record<number, number> { return Object.fromEntries(this.solidFurniture.map((f, i) => [f.id, this.furniture[i].temperature])); }
   stats() {
     let min = Infinity, max = -Infinity, energy = 0, capacity = 0;
     for (let i = 0; i < this.T.length; i++) if (this.capacity[i]) { min = Math.min(min, this.T[i]); max = Math.max(max, this.T[i]); energy += this.T[i] * this.capacity[i]; capacity += this.capacity[i]; }

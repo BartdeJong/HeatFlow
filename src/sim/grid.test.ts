@@ -12,7 +12,8 @@ describe('exact cut-cell furniture', () => {
     for (const n of [10, 17, 24]) for (const offset of [0, 0.073]) {
       const g = new GridGeometry({ ...DEFAULT_ROOM, furniture: [{ ...table, x: table.x + offset }] }, n, n, n);
       expect(sum(g.furnitureVolumes[0])).toBeCloseTo(exact, 11);
-      expect(sum(g.volume) + exact).toBeCloseTo(polygonArea(roomFootprint(DEFAULT_ROOM)) * DEFAULT_ROOM.ceilingM, 10);
+      expect(sum(g.volume) + g.furnitureVolumes.reduce((total, volumes) => total + sum(volumes), 0))
+        .toBeCloseTo(polygonArea(roomFootprint(DEFAULT_ROOM)) * DEFAULT_ROOM.ceilingM, 10);
     }
   });
   it('retains separate solid capacity in partially occupied cells and open leg faces', () => {

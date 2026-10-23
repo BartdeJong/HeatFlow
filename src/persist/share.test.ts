@@ -155,12 +155,12 @@ describe('share', () => {
     const arr = [2, 500, 500, 1, 99, 500, 99, 500, [[9, 500, 500, 500]], [[9, 9, 500, 500, 1]], [[500, 500]]];
     const room = decodeRoom(btoa(JSON.stringify(arr)))!;
     expect(room).toEqual(sanitizeRoom(room));
-    expect(room.widthM).toBe(10);
+    expect(room.widthM).toBe(15);
     expect(room.wall.material).toBe('brick');
     expect(room.sources[0].powerKW).toBe(10);
     expect(room.sources[0].kind).toBe('heat');
     expect(room.openings[0].side).toBe('top');
-    expect(room.probes[0].x).toBe(10);
+    expect(room.probes[0].x).toBe(15);
   });
 
 
@@ -181,6 +181,17 @@ describe('share', () => {
     const code = encodeRoom(room);
     expect(code).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(decodeRoom(code)).toEqual(room);
+  });
+
+  it('round-trips canonical interior wall geometry through share links', () => {
+    const room = sanitizeRoom({
+      ...DEFAULT_ROOM,
+      interiorWalls: [
+        { id: 31, start: { x: 2, y: 2 }, end: { x: 4, y: 2 }, thicknessM: 0.1 },
+        { id: 32, start: { x: 6, y: 3 }, end: { x: 6, y: 5 }, thicknessM: 0.14 },
+      ],
+    });
+    expect(decodeRoom(encodeRoom(room))?.interiorWalls).toEqual(room.interiorWalls);
   });
 
   it('rejects malformed v6 fields and unsupported versions', () => {
