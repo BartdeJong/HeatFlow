@@ -12,6 +12,7 @@ export class WorkerEngine {
   private readonly recorder = new Recorder();
   private buffers: ArrayBuffer[] = [];
   private speedSamples: { wall: number; elapsed: number }[] = [];
+  private pendingSeconds = 0;
   constructor(private readonly now: () => number = () => performance.now(), private readonly create: (room: RoomConfig) => Simulation = room => new Simulation(room)) {}
   handle(command: WorkerCommand): boolean {
     if (command.type === 'recycle') {
@@ -23,6 +24,7 @@ export class WorkerEngine {
       this.running = this.requestedRunning && !this.failure;
       this.speed = Math.max(0, Math.min(1000, Number.isFinite(command.speed) ? command.speed : 1));
       this.speedSamples = [];
+      this.pendingSeconds = 0;
       return true;
     }
     if (command.type === 'reset') {
@@ -48,13 +50,14 @@ export class WorkerEngine {
     return true;
   }
   private restart(room: RoomConfig) {
-    this.failure = null; this.recorder.clear(); this.speedSamples = [];
+    this.failure = null; this.recorder.clear(); this.speedSamples = []; this.pendingSeconds = 0;
     try { this.sim = this.create(room); this.running = this.requestedRunning; this.record(); }
     catch (error) { this.sim = undefined; this.fail(error); }
   }
   private fail(error: unknown) { this.failure = error instanceof Error ? error.message : String(error); this.running = false; }
   private record() {
     const sim = this.sim; if (!sim || !this.room) return;
+    if (sim.elapsed < this.recorder.nextSampleAt - 1e-8) return;
     const stats = sim.stats();
     const elapsed = Math.abs(sim.elapsed - this.recorder.nextSampleAt) < 1e-8 ? this.recorder.nextSampleAt : sim.elapsed;
     this.recorder.record(elapsed, { avg: stats.mean, min: stats.min, max: stats.max,
@@ -67,10 +70,10 @@ export class WorkerEngine {
     for (let steps = 0; steps < 10000 && this.sim.elapsed < target - 1e-9 && this.now() - started < budgetMs; steps++) {
       this.record();
       const nextSample = this.recorder.nextSampleAt - this.sim.elapsed;
-      const step = Math.min(.25, target - this.sim.elapsed, nextSample > 1e-9 ? nextSample : .25);
+      const step = Math.min(1, target - this.sim.elapsed, nextSample > 1e-9 ? nextSample : 1);
       try {
-        const done = this.sim.advance(step);
-        const failure = this.sim.diagnostics().failure;
+        const done = this.sim.advance(step, 1);
+        const failure = this.sim.failure;
         if (failure) { this.fail(failure); break; }
         if (!(done > 0)) { this.fail('The solver did not advance. Reset the run or change the room configuration.'); break; }
         this.record();
@@ -79,9 +82,13 @@ export class WorkerEngine {
     return this.sim.elapsed - initial;
   }
   runChunk(wallSeconds: number, budgetMs = 10): number {
-    // No backlog is accumulated. Achieved speed reports actual simulated progress.
-    // A suspended tab resumes from its last physical state, without a catch-up burst.
-    return this.running ? this.advance(Math.max(0, Math.min(.1, wallSeconds)) * this.speed, budgetMs) : 0;
+    if (!this.running) return 0;
+    // Retain short scheduling deficits so yielding/publication does not lose time.
+    // Cap debt at 100ms of requested progress, including after tab suspension.
+    this.pendingSeconds = Math.min(this.speed * .1, this.pendingSeconds + Math.max(0, Math.min(.1, wallSeconds)) * this.speed);
+    const done = this.advance(this.pendingSeconds, budgetMs);
+    this.pendingSeconds = Math.max(0, this.pendingSeconds - done);
+    return done;
   }
   private array(length: number): Float64Array {
     const size = length * Float64Array.BYTES_PER_ELEMENT, index = this.buffers.findIndex(b => b.byteLength === size);

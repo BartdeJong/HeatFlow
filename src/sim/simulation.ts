@@ -65,7 +65,7 @@ export class Simulation implements SimulationField {
   constructor(room: RoomConfig, params: PhysicsParams = DEFAULT_PHYSICS) {
     if (furnitureOverlaps(room.furniture).length) throw new Error('Furniture overlaps: move or remove the highlighted pieces before starting.');
     this.room = room; this.boxes = room.furniture.map(furnitureBoxes); this.params = params; this.convection = room.convection;
-    const cells = { coarse: 24, balanced: 32, fine: 48 }[getModel(room).quality];
+    const cells = { fast: 8, coarse: 24, balanced: 32, fine: 48 }[getModel(room).quality];
     const spacing = Math.max(room.widthM, room.heightM, room.ceilingM) / cells;
     this.nx = Math.max(2, Math.round(room.widthM / spacing)); this.ny = Math.max(2, Math.round(room.heightM / spacing)); this.nz = Math.max(2, Math.round(room.ceilingM / spacing));
     this.grid = new GridGeometry(room, this.nx, this.ny, this.nz); this.flow = new FlowSolver(this.grid);
@@ -211,10 +211,11 @@ export class Simulation implements SimulationField {
     }
     return limit;
   }
-  advance(seconds: number): number {
+  get failure(): string | null { return this.failed; }
+  advance(seconds: number, maxSteps = 16): number {
     if (!Number.isFinite(seconds) || seconds <= 0 || this.failed) return 0;
     let done = 0;
-    for (let count = 0; count < 16 && done < seconds - 1e-10; count++) {
+    for (let attempt = 0, count = 0; attempt < maxSteps + 16 && count < maxSteps && done < seconds - 1e-10; attempt++) {
       let dt = Math.min(seconds - done, this.recommendedDt, this.thermalStableDt(), 1, this.advecting || this.convection ? this.flow.stableDt(1, this.convection ? this.T : undefined) : 1);
       if (!Number.isFinite(dt) || dt <= 0) dt = Math.min(seconds - done, .05);
       // Radiation/emitter stiffness and explicit thermal diffusion restrict this further below.
@@ -224,6 +225,7 @@ export class Simulation implements SimulationField {
       this.recommendedDt = Infinity;
       if (!this.step(dt)) { if (!this.failed && this.recommendedDt < dt) continue; break; }
       this.elapsed += dt; done += dt;
+      count++;
     }
     return done;
   }

@@ -32,9 +32,13 @@
   {#if section === 'config'}
   <label>Resolution
     <select value={model.quality} onchange={(e) => updateModel({ quality: e.currentTarget.value as ModelConfig['quality'] })}>
+      <option value="fast">Fast · 8 cells · for 300×</option>
       <option value="coarse">Coarse · 24 cells</option><option value="balanced">Balanced · 32 cells</option><option value="fine">Fine · 48 cells</option>
     </select>
   </label>
+  {#if model.quality === 'fast'}
+    <p class="hint">Fast mode uses a coarse airflow and temperature grid for accelerated runs. Local plumes and small temperature differences need a detailed mode. Changing resolution restarts the run.</p>
+  {/if}
   <label>Floor preset
     <select value={model.floor.boundary} onchange={(e) => floorPreset(e.currentTarget.value)}>
       <option value="ground">Ground floor · 10 °C ground</option><option value="adjacent">Above heated room · 20 °C</option><option value="outside">Exposed floor · outdoor air</option>

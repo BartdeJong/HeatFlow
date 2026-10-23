@@ -226,7 +226,7 @@ export const DEFAULT_ROOM: RoomConfig = {
   openings: [],
   probes: [],
   furniture: [],
-  model: DEFAULT_MODEL,
+  model: { ...DEFAULT_MODEL, quality: 'fast' },
 };
 
 export const DEFAULT_PHYSICS: PhysicsParams = {

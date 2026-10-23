@@ -8,6 +8,7 @@ Interactive 3D room heat and airflow simulation, built with Svelte 5, TypeScript
 npm install
 npm run dev      # open the URL printed by Vite
 npm test         # physics, persistence, rendering and runtime tests
+npm run benchmark # 300× worker pacing and energy checks in empty/furnished Fast rooms
 npm run check    # TypeScript and Svelte checks
 npm run build    # production files in dist/
 ```
@@ -35,9 +36,9 @@ The workspace keeps playback, speed and live readings above the room. The inspec
 - Drag sources/probes horizontally; **Shift-drag** changes height. Arrow keys move X/Y, **Page Up / Page Down** moves Z, and **Shift** increases the step. Sidebar coordinates allow precise placement.
 - Add/select furniture to change dimensions, material or rotation. Drag it or its handle to move it; **R** rotates a focused handle. Furniture and room geometry changes restart the run.
 - Click an opening marker or sidebar toggle to open or close it. Width, height, sill and wall position are adjustable.
-- The physics panel offers floor and weather presets, **Coarse / Balanced / Fine** quality (24/32/48 cells along the longest dimension), and advanced layer, leakage, solar, sensor and emitter inputs. Balanced is the default; quality changes restart the run.
+- The physics panel offers floor and weather presets, **Fast / Coarse / Balanced / Fine** quality (8/24/32/48 cells along the longest dimension), and advanced layer, leakage, solar, sensor and emitter inputs. Fast is the default for new rooms and is designed for 300× runs. It retains layered solid storage, radiation, ventilation and conservative airflow/heat transport, with less spatial detail in plumes and temperatures. Saved rooms retain their resolution; quality changes restart the run.
 - The solver runs in a module Web Worker, yielding in short computation chunks. Transferable field snapshots arrive about ten times/second. The main thread keeps a stable read-only field object for rendering; stale generation/revision snapshots are discarded after resets or edits. Probe histories are recorded against simulated time inside the worker.
-- Requested speed and achieved speed are separate. The worker limits computation to its budget rather than building an unbounded backlog; high requested acceleration may exceed the computer's available capacity.
+- Requested speed and achieved speed are separate. The worker retains at most 100ms of requested progress across computation chunks, so short scheduling delays do not lose simulated time or build an unbounded backlog. It checks its budget after each adaptive physics step and records histories only when a sample is due. Unobstructed rooms use a cached direct pressure solve; furniture uses the general cut-cell solver. Detailed modes and demanding rooms may still exceed the computer's available capacity.
 - Diagnostics expose air and surface temperatures, stored energy, ventilation, heating/cooling consumption, component boundary losses and energy-balance error. Stored energy uses a fixed 0°C reference. Material/geometry edits are accounted as controlled external energy interventions.
 
 ## Save and share
