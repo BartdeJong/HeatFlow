@@ -1,3 +1,5 @@
+import { TEMPERATURE_MIN_C, TEMPERATURE_MAX_C, temperatureStrength } from './temperature-scale';
+
 export type PaletteId = 'heat' | 'thermal';
 
 type Stops = ReadonlyArray<readonly [number, number, number, number]>;
@@ -56,6 +58,12 @@ export function paletteBytes(id: PaletteId): Uint8Array {
 }
 
 export function paletteCssGradient(id: PaletteId, direction = 'to top'): string {
-  const stops = PALETTES[id].stops.map(([p, r, g, b]) => `rgb(${r},${g},${b}) ${p * 100}%`);
+  // Include the exact midpoint and enough samples to show the curved opacity fade.
+  const positions = [...new Set([...PALETTES[id].stops.map(([p]) => p), ...Array.from({ length: 21 }, (_, i) => i / 20)])].sort((a, b) => a - b);
+  const stops = positions.map(p => {
+    const rgb = paletteColor(id, p);
+    const alpha = temperatureStrength(TEMPERATURE_MIN_C + p * (TEMPERATURE_MAX_C - TEMPERATURE_MIN_C));
+    return `rgba(${rgb.join(',')},${alpha}) ${p * 100}%`;
+  });
   return `linear-gradient(${direction}, ${stops.join(', ')})`;
 }
