@@ -55,7 +55,9 @@
 <svelte:window onclick={(event) => { if (event.target instanceof Element && !event.target.closest('.save-menu')) menuOpen = false; }} onkeydown={(event) => { if (event.key === 'Escape' && menuOpen) { menuOpen = false; document.getElementById('save-menu-toggle')?.focus(); } }} />
 <header class="app-header">
   <div class="brand" aria-label="HeatFlow"><span class="brand-mark">≋</span>HeatFlow <span class="brand-subtitle">THERMAL STUDIO</span></div>
-  <div class="save-menu">
+  <div class="header-actions">
+    <button class="focus-toggle" onclick={() => app.focusView = true}>Focus view</button>
+    <div class="save-menu">
     <button class="save-toggle" id="save-menu-toggle" aria-expanded={menuOpen} aria-controls="save-share-panel" onclick={() => menuOpen = !menuOpen}>Save &amp; Share <span aria-hidden="true">↗</span></button>
     <div class="save-popover" id="save-share-panel" role="region" aria-label="Save and share room" hidden={!menuOpen}>
   <fieldset>
@@ -79,12 +81,15 @@
   </fieldset>
 
 </div></div>
+    </div>
 </header>
 <style>
 .app-header { height: 64px; padding: 0 24px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--border); background:var(--surface); gap:12px; }
 .brand { display:flex; align-items:center; gap:10px; color:var(--text); text-decoration:none; font-weight:650; font-size:20px; letter-spacing:-.6px; }
 .brand-mark { display:grid; place-items:center; width:32px; height:32px; border-radius:9px; background:var(--accent); color:#19130e; font-size:30px; }
 .brand-subtitle { font-size:9px; letter-spacing:1.5px; color:var(--muted); margin-left:10px; }
+.header-actions { display:flex; align-items:center; gap:8px; }
+.focus-toggle { padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:12px; cursor:pointer; white-space:nowrap; }
 .save-menu { position:relative; z-index:20; }
 .save-toggle { list-style:none; padding:9px 12px; border:1px solid var(--border); border-radius:8px; font-size:12px; cursor:pointer; white-space:nowrap; }
 .save-toggle span { margin-left:12px; color:var(--accent); }

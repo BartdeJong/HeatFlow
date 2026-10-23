@@ -43,11 +43,14 @@ export function fieldVectors(field: SimulationField): HeatFlowVector[] {
 export function weightedTrilerp(f: ArrayLike<number>, weights: ArrayLike<number>, nx: number, ny: number, nz: number, x: number, y: number, z: number): number {
   const dims = [nx, ny, nz], pos = [x, y, z].map((p,a) => Math.max(0,Math.min(dims[a]-1,p)));
   const lo = pos.map(Math.floor), hi=lo.map((p,a)=>Math.min(dims[a]-1,p+1)), mix=pos.map((p,a)=>p-lo[a]);
-  let total=0, value=0;
+  let total=0, value=0, reference: number | undefined;
   for(let k=0;k<2;k++)for(let j=0;j<2;j++)for(let i=0;i<2;i++) {
     const ix=i?hi[0]:lo[0],iy=j?hi[1]:lo[1],iz=k?hi[2]:lo[2],index=(iz*ny+iy)*nx+ix;
     const w=weights[index]*(i?mix[0]:1-mix[0])*(j?mix[1]:1-mix[1])*(k?mix[2]:1-mix[2]);
-    total+=w;value+=w*f[index];
+    if (w <= 0) continue;
+    const sample = f[index];
+    reference ??= sample;
+    total+=w;value+=w*(sample-reference);
   }
-  return total?value/total:trilerp(f,nx,ny,nz,x,y,z);
+  return total && reference !== undefined ? reference + value/total : trilerp(f,nx,ny,nz,x,y,z);
 }

@@ -6,8 +6,9 @@ import { solveVentilation } from './ventilation';
 import { buildSurfaces, type Surface, type SurfaceKind } from './surfaces';
 import { RadiationEnclosure, type RadiationPatch } from './radiation';
 import { getEnvironment, traceSolar, exteriorConvection, exteriorLongwaveW } from './environment';
-import { furnitureBoxes, furnitureOverlaps, type Point3 } from './furniture';
+import { furnitureBoxes, furnitureOverlaps, unionRectangleArea, type Point3 } from './furniture';
 import { fieldVectors, trilerp, weightedTrilerp, type SimulationField } from './field';
+import { footprintContains, polygonArea, roomFootprint, footprintWalls } from './footprint';
 export { trilerp } from './field';
 export type { HeatFlowVector } from './field';
 export interface HeatLossBreakdown { roofW: number; wallsW: number; floorW: number; openingsW: number; ventilationW: number; totalW: number }
@@ -144,7 +145,7 @@ export class Simulation implements SimulationField {
       return { cells: Int32Array.from(entries), weights: Float64Array.from(entries, i => this.capacity[i] / total) };
     });
     const thermalSources = room.sources.filter(s => s.kind !== 'fan');
-    const key = JSON.stringify([room.openings, room.wall, room.roof, room.model?.floor, room.model?.wallLayers, room.model?.roofLayers, thermalSources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
+    const key = JSON.stringify([room.footprint, room.openings, room.wall, room.roof, room.model?.floor, room.model?.wallLayers, room.model?.roofLayers, thermalSources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
     if (key !== this.surfaceKey) {
       const previous = new Map(this.surfaces.map(s => [s.id, s]));
       this.surfaces = buildSurfaces(room, this.params.initialC);
@@ -248,21 +249,40 @@ export class Simulation implements SimulationField {
     this.ventilationACH = ventilation.inflowM3s * 3600 / this.grid.volume.reduce((a, b) => a + b, 0);
     const boundaries: BoundaryFlow[] = [];
     const thermalFlows: { cell: number; q: number }[] = [];
-    const boundaryTotals = new Map<string, { axis: 0 | 1; index: number; q: number }>();
+    const boundaryTotals = new Map<string, { axis: 0 | 1; index: number; cell: number; outwardSign: -1 | 1; area: number; q: number }>();
     for (const f of ventilation.flows) {
-      const axis = f.side === 'top' || f.side === 'bottom' ? 1 : 0;
-      const alongSpacing = axis === 0 ? this.dy : this.dx, alongCount = axis === 0 ? this.ny : this.nx;
+      const wall = footprintWalls(this.room)[f.wallIndex];
+      const axis = wall.start.x === wall.end.x ? 0 : 1;
+      const along = 1 - axis, alongSpacing = axis === 0 ? this.dy : this.dx, alongCount = axis === 0 ? this.ny : this.nx;
+      const startCoord = axis === 0 ? wall.start.y : wall.start.x, endCoord = axis === 0 ? wall.end.y : wall.end.x;
       const targets: { index: number; cell: number; area: number }[] = [];
       const from = f.from ?? f.pos - alongSpacing / 2, to = f.to ?? f.pos + alongSpacing / 2;
+      const coordA = startCoord + (endCoord - startCoord) * from / wall.length;
+      const coordB = startCoord + (endCoord - startCoord) * to / wall.length;
+      const worldFrom = Math.min(coordA, coordB), worldTo = Math.max(coordA, coordB);
+      const faceCount = axis === 0 ? this.nx : this.ny;
+      const faceCoordinate = axis === 0 ? wall.start.x : wall.start.y;
+      const faceSpacing = axis === 0 ? this.dx : this.dy;
+      const face = Math.max(0, Math.min(faceCount, Math.round(faceCoordinate / faceSpacing)));
+      const outwardSign = (wall.normal[axis] < 0 ? -1 : 1) as -1 | 1;
       const bottom = f.bottom ?? f.z - this.dz / 2, top = f.top ?? f.z + this.dz / 2;
       for (let z = Math.max(0, Math.floor(bottom / this.dz)); z < Math.min(this.nz, Math.ceil(top / this.dz)); z++)
-        for (let along = Math.max(0, Math.floor(from / alongSpacing)); along < Math.min(alongCount, Math.ceil(to / alongSpacing)); along++) {
-          const x = axis === 0 ? f.side === 'left' ? 0 : this.nx - 1 : along;
-          const y = axis === 1 ? f.side === 'top' ? 0 : this.ny - 1 : along;
-          const index = axis === 0 ? this.grid.uIndex(f.side === 'left' ? 0 : this.nx, y, z) : this.grid.vIndex(x, f.side === 'top' ? 0 : this.ny, z);
-          const area = Math.max(0, Math.min(to, (along + 1) * alongSpacing) - Math.max(from, along * alongSpacing)) *
-            Math.max(0, Math.min(top, (z + 1) * this.dz) - Math.max(bottom, z * this.dz)) *
-            (axis === 0 ? this.grid.openU[index] : this.grid.openV[index]) / (alongSpacing * this.dz);
+        for (let alongCell = Math.max(0, Math.floor(worldFrom / alongSpacing)); alongCell < Math.min(alongCount, Math.ceil(worldTo / alongSpacing)); alongCell++) {
+          const inside = Math.max(0, Math.min(faceCount - 1, Math.floor((faceCoordinate - outwardSign * 1e-6) / faceSpacing)));
+          const x = axis === 0 ? inside : alongCell;
+          const y = axis === 1 ? inside : alongCell;
+          if (x < 0 || x >= this.nx || y < 0 || y >= this.ny) continue;
+          const index = axis === 0 ? this.grid.uIndex(face, y, z) : this.grid.vIndex(x, face, z);
+          const overlap = Math.max(0, Math.min(worldTo, (alongCell + 1) * alongSpacing) - Math.max(worldFrom, alongCell * alongSpacing));
+          const height = Math.max(0, Math.min(top, (z + 1) * this.dz) - Math.max(bottom, z * this.dz));
+          const plane = axis === 0 ? wall.start.x : wall.start.y;
+          const blockedRects = this.boxes.flat().filter((box) => box.min[axis] <= plane + alongSpacing * 1e-6 && box.max[axis] >= plane - alongSpacing * 1e-6)
+            .map((box) => [Math.max(worldFrom, box.min[along]), Math.min(worldTo, box.max[along]),
+              Math.max(bottom, box.min[2]), Math.min(top, box.max[2])] as const);
+          const blocked = unionRectangleArea(blockedRects.map(([a, b, lo, hi]) =>
+            [Math.max(a, alongCell * alongSpacing), Math.min(b, (alongCell + 1) * alongSpacing),
+              Math.max(lo, z * this.dz), Math.min(hi, (z + 1) * this.dz)] as const));
+          const area = Math.max(0, overlap * height - blocked);
           const cell = this.index(x, y, z);
           if (area > 0 && this.capacity[cell]) targets.push({ index, cell, area });
         }
@@ -271,12 +291,13 @@ export class Simulation implements SimulationField {
       for (const t of targets) {
         const q = f.volumeM3s * t.area / totalArea;
         thermalFlows.push({ cell: t.cell, q });
-        const key = `${axis}:${t.index}`, entry = boundaryTotals.get(key) ?? { axis, index: t.index, q: 0 };
-        entry.q += q * (f.side === 'top' || f.side === 'left' ? 1 : -1); boundaryTotals.set(key, entry);
+        const key = `${axis}:${t.index}:${t.cell}`, entry = boundaryTotals.get(key) ??
+          { axis, index: t.index, cell: t.cell, outwardSign, area: 0, q: 0 };
+        entry.q += q; entry.area += t.area; boundaryTotals.set(key, entry);
       }
     }
-    for (const { axis, index, q } of boundaryTotals.values()) {
-      const area = (axis === 0 ? this.grid.openU : this.grid.openV)[index]; if (area) boundaries.push({ axis, index, velocity: q / area });
+    for (const { axis, index, cell, outwardSign, area, q } of boundaryTotals.values()) {
+      if (area) boundaries.push({ axis, index, cell, outwardSign, area, velocity: -outwardSign * q / area });
     }
     const ventilationRates = new Float64Array(this.T.length);
     for (const f of thermalFlows) ventilationRates[this.grid.representative[f.cell]] += Math.abs(f.q) * this.params.airDensity * this.params.airCp;
@@ -337,7 +358,7 @@ export class Simulation implements SimulationField {
     }
     for (const [id, watts] of solar.furnitureW) { const j = this.room.furniture.findIndex(f => f.id === id); if (j >= 0 && this.furniture[j].capacity) this.furniture[j].temperature += watts * dt / this.furniture[j].capacity; }
     this.externalJ += this.solarW * dt; this.exchangedJ += Math.abs(this.solarW * dt);
-    const floorArea = this.room.widthM * this.room.heightM;
+    const floorArea = polygonArea(roomFootprint(this.room));
     for (let j = 0; j < this.surfaces.length; j++) {
       const surface = this.surfaces[j], contact = this.contacts[j], air = this.contactState(contact);
       if (!air.capacity) continue;
@@ -499,6 +520,8 @@ export class Simulation implements SimulationField {
     return { min, max, mean: energy / capacity };
   }
   isSolid(x: number, y: number, z: number) {
+    if (x < 0 || y < 0 || z < 0 || x > this.room.widthM || y > this.room.heightM || z > this.room.ceilingM ||
+      !footprintContains(this.room, x, y)) return true;
     const p = [x, y, z]; return this.boxes.some(parts => parts.some(b => p.every((n, a) => n >= b.min[a] && n <= b.max[a])));
   }
   sample(x: number, y: number, z = this.room.ceilingM / 2): number {

@@ -5,13 +5,13 @@
   import { defaultCamera, dot, pointOnPlane, project, screenRay, viewTransform, walkTransform, type Camera, type Vec3, type ViewTransform } from '../render/camera';
   import { AirflowTrails, airflowHighlight } from '../render/airflow';
   import { TemperatureDisplay } from '../render/temperature';
-  import { paletteColor } from '../render/palette';
-  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, temperaturePosition } from '../render/temperature-scale';
+  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, gradientOpacityValue } from '../render/temperature-scale';
   import { SimulationClient } from '../sim/runtime';
   import type { SimulationField } from '../sim/field';
   import { getEmitter } from '../sim/model';
-  import type { Opening } from '../sim/config';
+  import { getOpeningWallIndex, type Opening } from '../sim/config';
   import { DEFAULT_CEILING_FAN, FURNITURE_PRESETS, ROOF_MATERIALS, roofGeometry } from '../sim/config';
+  import { footprintContains, footprintLineIntervals, footprintRectangles, footprintWalls } from '../sim/footprint';
   import { furnitureBoxes, intersectBox } from '../sim/furniture';
   import { app, moveItem, recorder, select, updateFurniture, updateOpening } from '../state/app.svelte';
 
@@ -71,6 +71,10 @@
   const walkerRadius = 0.18, walkerHeight = 1.7;
   function canWalkerOccupy(x: number, y: number) {
     if (x < walkerRadius || y < walkerRadius || x > app.room.widthM - walkerRadius || y > app.room.heightM - walkerRadius) return false;
+    if (![
+      [x - walkerRadius, y - walkerRadius], [x + walkerRadius, y - walkerRadius],
+      [x + walkerRadius, y + walkerRadius], [x - walkerRadius, y + walkerRadius],
+    ].every(([px, py]) => footprintContains(app.room, px, py))) return false;
     return !boxes.some((box) => box.min[2] < walkerHeight && box.max[2] > 0.12
       && x + walkerRadius > box.min[0] && x - walkerRadius < box.max[0]
       && y + walkerRadius > box.min[1] && y - walkerRadius < box.max[1]);
@@ -199,14 +203,15 @@
     if (e.key.toLowerCase() === 'r') { e.preventDefault(); updateFurniture(id, { rotation: f.rotation === 0 ? 90 : 0 }); }
   }
   function openingPoints(o: Opening): Vec3[] {
-    const a = o.pos - o.length / 2, b = o.pos + o.length / 2;
+    const wall = footprintWalls(app.room)[getOpeningWallIndex(app.room, o)];
+    const a = (o.pos - o.length / 2) / wall.length, b = (o.pos + o.length / 2) / wall.length;
     const lo = o.sillM, hi = lo + o.heightM;
-    if (o.side === 'top' || o.side === 'bottom') {
-      const y = o.side === 'top' ? 0 : app.room.heightM;
-      return [[a, y, lo], [b, y, lo], [b, y, hi], [a, y, hi]];
-    }
-    const x = o.side === 'left' ? 0 : app.room.widthM;
-    return [[x, a, lo], [x, b, lo], [x, b, hi], [x, a, hi]];
+    const point = (t: number, z: number): Vec3 => [
+      wall.start.x + (wall.end.x - wall.start.x) * t,
+      wall.start.y + (wall.end.y - wall.start.y) * t,
+      z,
+    ];
+    return [point(a, lo), point(b, lo), point(b, hi), point(a, hi)];
   }
 
   function drawOverlay(v: ViewTransform, wallDt: number) {
@@ -253,10 +258,11 @@
       const color = ROOF_MATERIALS.find((m) => m.id === app.room.roof.material)!.color;
       const left = -t - o, right = w + t + o, low = h - o * Math.tan(app.room.roof.pitchDeg * Math.PI / 180);
       // Translucent exterior keeps the simulation and its controls visible through the shell.
-      polygon([[-t, -t, 0], [w + t, -t, 0], [w + t, -t, h], [-t, -t, h]], '#bfa18418', '#ccb39570');
-      polygon([[w + t, -t, 0], [w + t, l + t, 0], [w + t, l + t, h], [w + t, -t, h]], '#bfa18418', '#ccb39570');
-      polygon([[-t, l + t, 0], [w + t, l + t, 0], [w + t, l + t, h], [-t, l + t, h]], '#bfa18418', '#ccb39570');
-      polygon([[-t, -t, 0], [-t, l + t, 0], [-t, l + t, h], [-t, -t, h]], '#bfa18418', '#ccb39570');
+      for (const wall of footprintWalls(app.room)) {
+        const a: Vec3 = [wall.start.x + wall.normal[0] * t, wall.start.y + wall.normal[1] * t, 0];
+        const b: Vec3 = [wall.end.x + wall.normal[0] * t, wall.end.y + wall.normal[1] * t, 0];
+        polygon([a, b, [b[0], b[1], h], [a[0], a[1], h]], '#bfa18418', '#ccb39570');
+      }
       for (const y of [-t, l + t]) polygon([[-t, y, h], [w / 2, y, h + rise], [w + t, y, h]], '#bfa18422', '#ccb39570');
       polygon([[left, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [left, l+t+o, low]], color + '55', color);
       polygon([[right, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [right, l+t+o, low]], color + '55', color);
@@ -272,7 +278,9 @@
       }
     }
     if (app.room.heatingMode === 'underfloor' && app.room.sources.some((s) => s.kind === 'heat' && s.powerKW > 0)) {
-      polygon([[0,0,0], [w,0,0], [w,l,0], [0,l,0]], app.stats.thermostatHeating ? '#ff914233' : '#ff914210', '#ff914288');
+      for (const rect of footprintRectangles(app.room)) polygon([
+        [rect.x0, rect.y0, 0], [rect.x1, rect.y0, 0], [rect.x1, rect.y1, 0], [rect.x0, rect.y1, 0],
+      ], app.stats.thermostatHeating ? '#ff914233' : '#ff914210', '#ff914288');
     }
     const fan = app.room.sources.find((source) => source.kind === 'fan');
     if (fan) {
@@ -303,14 +311,17 @@
       ctx.stroke();
     }
     if (cameraMode !== 'walk') {
-      for (let x = 0; x <= w; x++) line([x, 0, 0], [x, l, 0], '#ffffff14');
-      for (let y = 0; y <= l; y++) line([0, y, 0], [w, y, 0], '#ffffff14');
+      for (let x = 0; x <= w; x++) for (const [from, to] of footprintLineIntervals(app.room, 0, x))
+        line([x, from, 0], [x, to, 0], '#ffffff14');
+      for (let y = 0; y <= l; y++) for (const [from, to] of footprintLineIntervals(app.room, 1, y))
+        line([from, y, 0], [to, y, 0], '#ffffff14');
     }
     for (const z of [0, h]) {
-      const corners: Vec3[] = [[0, 0, z], [w, 0, z], [w, l, z], [0, l, z]];
-      for (let i = 0; i < 4; i++) line(corners[i], corners[(i + 1) % 4], z === 0 ? '#c7d6e5a0' : '#bfd4e766', z === 0 ? 2 : 1);
+      const walls = footprintWalls(app.room);
+      for (const wall of walls) line([wall.start.x, wall.start.y, z], [wall.end.x, wall.end.y, z], z === 0 ? '#c7d6e5a0' : '#bfd4e766', z === 0 ? 2 : 1);
     }
-    for (const [x, y] of [[0, 0], [w, 0], [w, l], [0, l]]) line([x, y, 0], [x, y, h], '#bfd4e780', 1.5);
+    for (const point of app.room.footprint ?? [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: l }, { x: 0, y: l }])
+      line([point.x, point.y, 0], [point.x, point.y, h], '#bfd4e780', 1.5);
     for (const o of app.room.openings) {
       const points = openingPoints(o).map((p) => project(v, p));
       ctx.beginPath(); points.forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath();
@@ -320,12 +331,21 @@
     }
     if (app.view === 'slice') {
       const axis = ['x', 'y', 'z'].indexOf(app.sliceAxis);
-      const other = [0, 1, 2].filter((n) => n !== axis), size = [w, l, h];
-      const corners = [[0, 0], [1, 0], [1, 1], [0, 1]].map(([a, b]) => {
-        const p: Vec3 = [0, 0, 0]; p[axis] = size[axis] * app.sliceFraction;
-        p[other[0]] = a * size[other[0]]; p[other[1]] = b * size[other[1]]; return p;
-      });
-      for (let i = 0; i < 4; i++) line(corners[i], corners[(i + 1) % 4], '#ffc98c', 1.5);
+      const coordinate = [w, l, h][axis] * app.sliceFraction;
+      if (axis === 2) {
+        for (const wall of footprintWalls(app.room)) {
+          const a: Vec3 = [wall.start.x, wall.start.y, coordinate], b: Vec3 = [wall.end.x, wall.end.y, coordinate];
+          line(a, b, '#ffc98c', 1.5);
+        }
+      } else {
+        const intervals = footprintLineIntervals(app.room, axis as 0 | 1, coordinate);
+        for (const [from, to] of intervals) {
+          const a: Vec3 = axis === 0 ? [coordinate, from, 0] : [from, coordinate, 0];
+          const b: Vec3 = axis === 0 ? [coordinate, to, 0] : [to, coordinate, 0];
+          const c: Vec3 = [a[0], a[1], h], d: Vec3 = [b[0], b[1], h];
+          line(a, b, '#ffc98c', 1.5); line(b, d, '#ffc98c', 1.5); line(d, c, '#ffc98c', 1.5); line(c, a, '#ffc98c', 1.5);
+        }
+      }
     }
     for (const item of [...app.room.sources, ...app.room.probes]) {
       if ('kind' in item && item.kind === 'fan') continue;
@@ -335,7 +355,8 @@
     if (app.view === 'volume' && (app.room.convection || (fan !== undefined && fan.fanEnabled !== false)) && app.showAirflow) {
       const seeds: Vec3[] = [];
       for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) {
-        seeds.push([w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)]);
+        const point: Vec3 = [w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)];
+        if (footprintContains(app.room, point[0], point[1])) seeds.push(point);
       }
       // Extra seeds around each source reveal its plume and the returning circulation.
       for (const source of app.room.sources) for (let i = 0; i < 12; i++) {
@@ -359,9 +380,8 @@
             const highlight = airflowHighlight(airflow.phase, i, j);
             const taper = Math.min(1, j / 3, (path.length - j) / 3);
             const a = project(v, path[j - 1]), b = project(v, path[j]);
-            const rgb = paletteColor(app.palette, temperaturePosition(temperatures[j]));
-            ctx.strokeStyle = `rgba(${rgb.join(',')},${layer.opacity * taper * (0.14 + 0.8 * highlight)})`;
-            ctx.lineWidth = 1 + highlight * 1.6;
+            ctx.strokeStyle = `rgba(151,220,116,${layer.opacity * taper * (0.045 + 0.68 * highlight)})`;
+            ctx.lineWidth = 1 + highlight * 0.8;
             ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
           }
         }
@@ -411,10 +431,14 @@
       const wallDt = Math.min(0.1, (now - last) / 1000); last = now;
       if (cameraMode === 'walk') updateWalker(wallDt);
       temperatureDisplay.update(sim, app.running ? wallDt : 0);
+      const viewCamera = app.focusView
+        ? { ...camera, pitch: Math.max(0.08, camera.pitch - 0.18), zoom: camera.zoom * 2 }
+        : camera;
       transform = cameraMode === 'walk'
         ? walkTransform(app.room, walkCamera, walkPosition, canvas.clientWidth, canvas.clientHeight)
-        : viewTransform(app.exterior ? { ...app.room, ceilingM: app.room.ceilingM + roofGeometry(app.room).rise + 0.5 } : app.room, camera, canvas.clientWidth, canvas.clientHeight);
-      renderer!.render(sim, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, walkMode: cameraMode === 'walk', temperatureField: temperatureDisplay,
+        : viewTransform(app.exterior ? { ...app.room, ceilingM: app.room.ceilingM + roofGeometry(app.room).rise + 0.5 } : app.room,
+          viewCamera, canvas.clientWidth, canvas.clientHeight);
+      renderer!.render(sim, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, walkMode: cameraMode === 'walk', gradientOpacity: app.showTemperatureGradient ? gradientOpacityValue(app.gradientOpacity) : 0, temperatureField: temperatureDisplay,
         furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
       drawOverlay(transform, wallDt);
       markers = cameraMode === 'walk' ? [] : [
@@ -451,17 +475,22 @@
   });
 </script>
 
-<div class="stage">
-  <div class="metric-cards" aria-label="Live simulation readings">
-    <div><span>ROOM AVERAGE</span><strong>{app.stats.mean.toFixed(1)}<small> °C</small></strong></div>
-    <div><span>HOTTEST AIR</span><strong>{app.stats.max.toFixed(1)}<small> °C</small></strong></div>
-    <div><span>HEAT LOSS</span><strong>{Math.abs(app.stats.heatLoss.totalW) >= 1000 ? (app.stats.heatLoss.totalW / 1000).toFixed(2) : app.stats.heatLoss.totalW.toFixed(0)}<small> {Math.abs(app.stats.heatLoss.totalW) >= 1000 ? 'kW' : 'W'}</small></strong></div>
-  </div>
+<div class="stage" class:focused={app.focusView}>
+  {#if !app.focusView}
+    <div class="metric-cards" aria-label="Live simulation readings">
+      <div><span>ROOM AVERAGE</span><strong>{app.stats.mean.toFixed(1)}<small> °C</small></strong></div>
+      <div><span>HOTTEST AIR</span><strong>{app.stats.max.toFixed(1)}<small> °C</small></strong></div>
+      <div><span>HEAT LOSS</span><strong>{Math.abs(app.stats.heatLoss.totalW) >= 1000 ? (app.stats.heatLoss.totalW / 1000).toFixed(2) : app.stats.heatLoss.totalW.toFixed(0)}<small> {Math.abs(app.stats.heatLoss.totalW) >= 1000 ? 'kW' : 'W'}</small></strong></div>
+    </div>
+  {/if}
   <div class="heading">
-    <span class="eyebrow">HEATFLOW / SPATIAL SIMULATION</span>
+    {#if !app.focusView}<span class="eyebrow">HEATFLOW / SPATIAL SIMULATION</span>{/if}
     <h2>{cameraMode === 'walk' ? 'Walk through the room' : 'Room overview'}</h2>
     <p>{app.room.widthM.toFixed(1)} × {app.room.heightM.toFixed(1)} × {app.room.ceilingM.toFixed(1)} m <span>·</span>{app.room.convection ? hasActiveCeilingFan ? 'Buoyant airflow + ceiling fan' : 'Buoyant airflow' : hasActiveCeilingFan ? 'Ceiling fan circulation' : 'Thermal diffusion'}</p>
   </div>
+  {#if app.focusView}
+    <button class="edit-toggle" onclick={() => app.focusView = false}>Edit room</button>
+  {/if}
   <div class="view-tools" aria-label="3D view controls">
     <button aria-pressed={cameraMode === 'orbit'} class:active={cameraMode === 'orbit'} onclick={() => setCameraMode('orbit')}>Orbit</button>
     <button aria-pressed={cameraMode === 'walk'} class:active={cameraMode === 'walk'} onclick={() => setCameraMode('walk')}>Walk</button>
@@ -506,13 +535,18 @@
       <div class="tip" style:left="{hover.px}px" style:top="{hover.py}px">{hover.temp.toFixed(1)} °C <span>at {hover.z.toFixed(1)} m</span></div>
     {/if}
   </div>
-  <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')}></div><div class="scale-values"><span>{TEMPERATURE_MIN_C}</span><span>{ROOM_TEMPERATURE_C}</span><span>{TEMPERATURE_MAX_C}</span></div></div>
+  {#if app.showTemperatureGradient}
+    <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')} style:opacity={gradientOpacityValue(app.gradientOpacity)}></div><div class="scale-values"><span>{TEMPERATURE_MIN_C}</span><span>{ROOM_TEMPERATURE_C}</span><span>{TEMPERATURE_MAX_C}</span></div></div>
+  {/if}
   <div class="view-caption"><span class="live" class:paused={!app.running}></span>{cameraMode === 'walk' ? 'First-person room view' : app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
-  <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag heat or cold sources to lift · Move fan horizontally'}</p>
+  {#if !app.focusView}
+    <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag heat or cold sources to lift · Move fan horizontally'}</p>
+  {/if}
 </div>
 
 <style>
   .stage { flex:1; position: relative; min-height: 0; min-width: 0; overflow: hidden; background: radial-gradient(ellipse at 50% 50%, #222b3b 0, #151b26 52%, #11151d 100%); }
+  .stage.focused { background:#121821; }
   .heading { position: absolute; top: 118px; left: 28px; z-index: 2; pointer-events: none; }
   .eyebrow { color: #8e9eb4; font-size: 10px; letter-spacing: 0.17em; }
   h2 { margin: 8px 0; font-size: 25px; font-weight: 500; letter-spacing: -0.03em; }
@@ -541,6 +575,14 @@
   .live { width: 6px; height: 6px; border-radius: 50%; background: #78cfaa; margin-right: 8px; box-shadow: 0 0 8px #78cfaa55; }
   .live.paused { background: #e1b46f; }
   .instructions { position: absolute; left: 20px; right: 20px; bottom: 13px; margin: 0; font-size: 11px; color: #74849d; text-align: center; pointer-events: none; }
+  .stage.focused .heading { top:12px; left:18px; }
+  .stage.focused .heading h2 { margin:0 0 7px; font-size:19px; font-weight:600; letter-spacing:-.02em; }
+  .stage.focused .heading p { font-size:11px; }
+  .stage.focused .room { inset:0; }
+  .stage.focused .view-tools { right:14px; bottom:14px; }
+  .stage.focused .view-caption { bottom:13px; }
+  .edit-toggle { position:absolute; top:16px; right:16px; z-index:4; padding:7px 11px; border:1px solid #394555; border-radius:7px; background:#1b2431c9; color:#aebbd0; font-size:11px; }
+  .edit-toggle:hover { color:#fff; border-color:#617086; }
 
 .metric-cards { position:absolute; top:22px; left:28px; right:28px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; z-index:2; pointer-events:none; }
 .metric-cards > div { background:#1c2431bb; border:1px solid #354052; border-radius:10px; padding:14px 18px; }
@@ -552,5 +594,5 @@
 .scale-label,.scale-values { display:flex; justify-content:space-between; } .scale-gradient { height:6px; border-radius:4px; margin:7px 0; }
 .view-caption { bottom:30px; } .instructions { bottom:6px; font-size:10px; }
 @media(max-width:1100px) { h2 { font-size:20px; } }
-@media(max-width:600px) { .metric-cards { left:16px; right:16px; top:16px; gap:7px; } .metric-cards > div { padding:12px 10px; } .metric-cards strong { font-size:22px; } .metric-cards span { font-size:8px; letter-spacing:.4px; } .heading { left:16px; top:110px; } .heading .eyebrow { display:none; } .view-tools { right:16px; bottom:58px; } .room { inset:150px 0 90px; } .temperature-scale { left:16px; bottom:58px; width:95px; } .view-caption { bottom:24px; font-size:10px; white-space:nowrap; } .instructions { display:none; } }
+@media(max-width:600px) { .metric-cards { left:16px; right:16px; top:16px; gap:7px; } .metric-cards > div { padding:12px 10px; } .metric-cards strong { font-size:22px; } .metric-cards span { font-size:8px; letter-spacing:.4px; } .heading { left:16px; top:110px; } .heading .eyebrow { display:none; } .view-tools { right:16px; bottom:58px; } .room { inset:150px 0 90px; } .temperature-scale { left:16px; bottom:58px; width:95px; } .view-caption { bottom:24px; font-size:10px; white-space:nowrap; } .instructions { display:none; } .stage.focused .view-tools { right:8px; bottom:8px; } .stage.focused .heading { left:12px; top:10px; } .edit-toggle { top:10px; right:10px; } }
 </style>

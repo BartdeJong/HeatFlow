@@ -23,7 +23,7 @@ export function snapshotBuffers(snapshot: SimulationSnapshot): ArrayBuffer[] {
 }
 /** Only geometry/storage changes restart a run. Weather, openings, sensors and power update live. */
 export function geometryKey(room: RoomConfig): string {
-  return JSON.stringify([room.widthM, room.heightM, room.ceilingM, room.convection, room.furniture,
+  return JSON.stringify([room.widthM, room.heightM, room.ceilingM, room.footprint, room.convection, room.furniture,
     room.wall, room.roof.insulationM, room.model?.quality ?? 'balanced', room.model?.wallLayers,
     room.model?.roofLayers, room.model?.floor.layers]);
 }

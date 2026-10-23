@@ -1,8 +1,9 @@
-import { wallRegions, type RoomConfig } from './config';
+import { getOpeningWallIndex, wallRegions, type RoomConfig } from './config';
 import { floorLayers, roofLayers, wallLayers, getEmitter, type ThermalLayer } from './model';
 import { furnitureBoxes, type Point3 } from './furniture';
 import { LayerColumn } from './thermal';
 import type { RadiationPatch } from './radiation';
+import { footprintRectangles, footprintWalls } from './footprint';
 export type SurfaceKind = 'wallsW' | 'roofW' | 'floorW' | 'openingsW' | 'furniture' | 'emitter' | 'aperture';
 export interface Surface extends RadiationPatch {
   id: string; label: string; kind: SurfaceKind; min: Point3; max: Point3;
@@ -20,31 +21,38 @@ export function buildSurfaces(room: RoomConfig, initialC: number): Surface[] {
     result.push({ id, label, kind, min, max, center, normal, tangentU, tangentV, area: da * db, emissivity, solarTransparent: kind === 'aperture',
       column: layers ? new LayerColumn(da * db, layers, initialC) : undefined, item, source });
   }
-  for (const side of ['top', 'bottom', 'left', 'right'] as const) {
-    const horizontal = side === 'top' || side === 'bottom';
-    const axis = horizontal ? 1 : 0, along = horizontal ? 0 : 1;
-    const coordinate = side === 'top' || side === 'left' ? 0 : horizontal ? room.heightM : room.widthM;
-    const normal: Point3 = [0, 0, 0]; normal[axis] = coordinate === 0 ? 1 : -1;
+  for (const wall of footprintWalls(room)) {
+    const dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
     let index = 0;
-    for (const region of wallRegions(room, side)) {
-      const opening = room.openings.findLast(o => o.side === side && Math.abs((region.from + region.to) / 2 - o.pos) < o.length / 2 &&
+    for (const region of wallRegions(room, wall.index)) {
+      const opening = room.openings.findLast(o => getOpeningWallIndex(room, o) === wall.index && Math.abs((region.from + region.to) / 2 - o.pos) < o.length / 2 &&
         (region.bottom + region.top) / 2 > o.sillM && (region.bottom + region.top) / 2 < o.sillM + o.heightM);
       const kind: SurfaceKind = opening?.open ? 'aperture' : opening ? 'openingsW' : 'wallsW';
       const construction = opening ? [{ label: opening.kind, thicknessM: .012, k: .012 / Math.max(.05, 1 / (opening.kind === 'window' ? 1.4 : 2) - .17), density: 2500, cp: 750 }] : wallLayers(room);
       const na = Math.ceil((region.to - region.from) / 1.5), nz = Math.ceil((region.top - region.bottom) / 1.5);
       for (let j = 0; j < nz; j++) for (let i = 0; i < na; i++) {
-        const min: Point3 = [0, 0, 0], max: Point3 = [0, 0, 0]; min[axis] = max[axis] = coordinate;
-        min[along] = region.from + i / na * (region.to - region.from); max[along] = region.from + (i + 1) / na * (region.to - region.from);
-        min[2] = region.bottom + j / nz * (region.top - region.bottom); max[2] = region.bottom + (j + 1) / nz * (region.top - region.bottom);
-        rectangle(`${side}:${index++}`, `${opening?.kind ?? side} ${index}`, kind, min, max, normal, opening?.open ? undefined : construction);
+        const from = region.from + i / na * (region.to - region.from), to = region.from + (i + 1) / na * (region.to - region.from);
+        const ax = wall.start.x + dx * from / wall.length, ay = wall.start.y + dy * from / wall.length;
+        const bx = wall.start.x + dx * to / wall.length, by = wall.start.y + dy * to / wall.length;
+        const min: Point3 = [Math.min(ax, bx), Math.min(ay, by), region.bottom + j / nz * (region.top - region.bottom)];
+        const max: Point3 = [Math.max(ax, bx), Math.max(ay, by), region.bottom + (j + 1) / nz * (region.top - region.bottom)];
+        rectangle(`wall${wall.index}:${index++}`, `${opening?.kind ?? `Wall ${wall.index + 1}`} ${index}`, kind, min, max, [-wall.normal[0], -wall.normal[1], 0], opening?.open ? undefined : construction);
       }
     }
   }
-  for (const floor of [true, false]) for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+  for (const floor of [true, false]) {
     const z = floor ? 0 : room.ceilingM;
-    rectangle(`${floor ? 'floor' : 'ceiling'}:${j * 4 + i}`, floor ? 'Floor' : 'Ceiling', floor ? 'floorW' : 'roofW',
-      [i / 4 * room.widthM, j / 4 * room.heightM, z], [(i + 1) / 4 * room.widthM, (j + 1) / 4 * room.heightM, z],
-      [0, 0, floor ? 1 : -1], floor ? floorLayers(room) : roofLayers(room));
+    let index = 0;
+    for (const footprint of footprintRectangles(room)) {
+      const nx = Math.max(1, Math.ceil((footprint.x1 - footprint.x0) / 1.5));
+      const ny = Math.max(1, Math.ceil((footprint.y1 - footprint.y0) / 1.5));
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        rectangle(`${floor ? 'floor' : 'ceiling'}:${index++}`, floor ? 'Floor' : 'Ceiling', floor ? 'floorW' : 'roofW',
+          [footprint.x0 + i / nx * (footprint.x1 - footprint.x0), footprint.y0 + j / ny * (footprint.y1 - footprint.y0), z],
+          [footprint.x0 + (i + 1) / nx * (footprint.x1 - footprint.x0), footprint.y0 + (j + 1) / ny * (footprint.y1 - footprint.y0), z],
+          [0, 0, floor ? 1 : -1], floor ? floorLayers(room) : roofLayers(room));
+      }
+    }
   }
   // Partition part faces at all intersections and discard hidden/internal rectangles.
   room.furniture.forEach((f, item) => {

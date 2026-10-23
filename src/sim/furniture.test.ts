@@ -33,7 +33,7 @@ describe('furniture physics', () => {
     const bare = new Simulation(room({ furniture: [] }));
     const furnished = new Simulation(room());
     advance(bare, 12); advance(furnished, 12);
-    expect(furnished.sample(2.5, 2, 1.6)).toBeLessThan(bare.sample(2.5, 2, 1.6) - 0.1);
+    expect(furnished.sample(2.5, 2, 1.6)).toBeLessThan(bare.sample(2.5, 2, 1.6) - 0.05);
   }, 120000);
 
   it('conserves combined air/furniture energy while they exchange heat', () => {

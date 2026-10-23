@@ -1,7 +1,13 @@
 import type { GridGeometry } from './grid';
 import { BoxPressureSolver } from './box-pressure';
 
-export interface BoundaryFlow { axis: 0 | 1 | 2; index: number; velocity: number }
+export interface BoundaryFlow {
+  axis: 0 | 1 | 2; index: number; velocity: number;
+  area?: number;
+  /** Interior-wall openings may prescribe a flux through a non-domain face. */
+  cell?: number;
+  outwardSign?: -1 | 1;
+}
 export interface FlowResult { converged: boolean; residual: number; maxDivergence: number; iterations: number }
 const NU = 1.5e-5, CS = 0.12;
 interface FaceEdge { a: number; b: number; axis: 0 | 1 | 2; face: number; area: number; distance: number }
@@ -33,6 +39,7 @@ export class FlowSolver {
   private readonly preconditioned: Float64Array;
   private readonly product: Float64Array;
   private readonly boxPressure?: BoxPressureSolver;
+  private readonly pressureTolerance: number;
 
   constructor(readonly grid: GridGeometry, private readonly options: { smagorinskyCs?: number } = {}) {
     const g = grid, { nx, ny, nz } = g;
@@ -72,9 +79,15 @@ export class FlowSolver {
     this.direction = new Float64Array(n); this.preconditioned = new Float64Array(n); this.product = new Float64Array(n);
     const fullVolume = g.dx * g.dy * g.dz;
     const fullEdgeCount = (nx - 1) * ny * nz + nx * (ny - 1) * nz + nx * ny * (nz - 1);
-    if (n === g.volume.length && this.edges.length === fullEdgeCount &&
+    const fullGrid = n === g.volume.length && this.edges.length === fullEdgeCount &&
       g.volume.every(v => Math.abs(v - fullVolume) < 1e-12 * fullVolume) &&
-      this.edges.every(e => Math.abs(e.area * e.distance - fullVolume) < 1e-12 * fullVolume)) {
+      this.edges.every(e => Math.abs(e.area * e.distance - fullVolume) < 1e-12 * fullVolume);
+    const alignedSingleComponent = components === 1 &&
+      g.volume.every(v => v === 0 || Math.abs(v - fullVolume) < 1e-12 * fullVolume) &&
+      g.volume.every((v, c) => v === 0 || g.representative[c] === c) &&
+      this.edges.every(e => Math.abs(e.area * e.distance - fullVolume) < 1e-12 * fullVolume);
+    this.pressureTolerance = alignedSingleComponent ? 5e-6 : 1e-7;
+    if (fullGrid) {
       this.boxPressure = new BoxPressureSolver([nx, ny, nz], [g.dx, g.dy, g.dz]);
     }
   }
@@ -182,9 +195,7 @@ export class FlowSolver {
     for (const b of boundary) {
       const c = this.boundaryCell(b);
       if (c < 0 || this.node[c] < 0) continue;
-      const dims = this.counts[b.axis], coord = b.axis === 0 ? b.index % dims[0] : b.axis === 1 ? Math.floor(b.index / dims[0]) % dims[1] : Math.floor(b.index / (dims[0] * dims[1]));
-      const sign = coord === 0 ? -1 : 1;
-      this.rhs[this.node[c]] -= sign * this.openings[b.axis][b.index] * b.velocity / dt;
+      this.rhs[this.node[c]] -= this.boundarySign(b) * this.boundaryArea(b) * b.velocity / dt;
     }
     const componentNet = new Float64Array(this.componentCount), componentGross = new Float64Array(this.componentCount);
     for (let n = 0; n < this.rhs.length; n++) { componentNet[this.component[n]] += this.rhs[n]; componentGross[this.component[n]] += Math.abs(this.rhs[n]); }
@@ -213,7 +224,7 @@ export class FlowSolver {
       }
       let rz = dot(this.residual, this.preconditioned);
       relativeResidual = rhsNorm ? Math.sqrt(initialNorm) / rhsNorm : 0;
-      const tolerance = 1e-7; // Stricter than public 1e-5 gate to control divergence in small cut cells.
+      const tolerance = this.pressureTolerance;
       const limit = Math.min(2000, Math.max(50, this.rhs.length));
       while (relativeResidual > tolerance && iterations < limit) {
         this.multiply(this.direction, this.product);
@@ -233,8 +244,7 @@ export class FlowSolver {
     for (const e of this.edges) { const q = e.area * this.arrays[e.axis][e.face]; net[e.a] += q; net[e.b] -= q; }
     for (const b of boundary) {
       const c = this.boundaryCell(b); if (c < 0 || this.node[c] < 0) continue;
-      const dims = this.counts[b.axis], coord = b.axis === 0 ? b.index % dims[0] : b.axis === 1 ? Math.floor(b.index / dims[0]) % dims[1] : Math.floor(b.index / (dims[0] * dims[1]));
-      net[this.node[c]] += (coord === 0 ? -1 : 1) * this.openings[b.axis][b.index] * b.velocity;
+      net[this.node[c]] += this.boundarySign(b) * this.boundaryArea(b) * b.velocity;
     }
     let maxDivergence = 0;
     for (let n = 0; n < net.length; n++) maxDivergence = Math.max(maxDivergence, Math.abs(net[n]) / this.volumes[n]);
@@ -249,12 +259,19 @@ export class FlowSolver {
     }
   }
   private boundaryCell(b: BoundaryFlow): number {
+    if (b.cell !== undefined) return b.cell >= 0 && b.cell < this.grid.volume.length && this.grid.volume[b.cell] > 0 ? b.cell : -1;
     const dims = this.counts[b.axis], i = b.index % dims[0], j = Math.floor(b.index / dims[0]) % dims[1], k = Math.floor(b.index / (dims[0] * dims[1]));
     const coord = [i, j, k], limit = [this.grid.nx, this.grid.ny, this.grid.nz];
     if (coord[b.axis] !== 0 && coord[b.axis] !== limit[b.axis]) return -1;
     coord[b.axis] = coord[b.axis] === 0 ? 0 : coord[b.axis] - 1;
     return this.grid.index(coord[0], coord[1], coord[2]);
   }
+  private boundarySign(b: BoundaryFlow): -1 | 1 {
+    if (b.outwardSign) return b.outwardSign;
+    const dims = this.counts[b.axis], coord = b.axis === 0 ? b.index % dims[0] : b.axis === 1 ? Math.floor(b.index / dims[0]) % dims[1] : Math.floor(b.index / (dims[0] * dims[1]));
+    return coord === 0 ? -1 : 1;
+  }
+  private boundaryArea(b: BoundaryFlow): number { return b.area ?? this.openings[b.axis][b.index]; }
   private enforceBoundaries(boundary: BoundaryFlow[]) {
     const g = this.grid, sizes = [g.nx, g.ny, g.nz];
     for (let axis = 0; axis < 3; axis++) {
@@ -268,7 +285,7 @@ export class FlowSolver {
         }
       }
     }
-    for (const b of boundary) if (b.index >= 0 && b.index < this.arrays[b.axis].length && this.boundaryCell(b) >= 0 && this.openings[b.axis][b.index] > 0) this.arrays[b.axis][b.index] = b.velocity;
+    for (const b of boundary) if (b.index >= 0 && b.index < this.arrays[b.axis].length && this.boundaryCell(b) >= 0 && this.boundaryArea(b) > 0) this.arrays[b.axis][b.index] = b.velocity;
   }
   private updateMixing() {
     const g = this.grid, h = [g.dx, g.dy, g.dz], delta = Math.cbrt(g.dx * g.dy * g.dz);

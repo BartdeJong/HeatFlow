@@ -1,7 +1,8 @@
-import type { Opening, RoomConfig, WallSide } from './config';
+import { getOpeningWallIndex, type Opening, type RoomConfig, type WallSide } from './config';
 import { furnitureBoxes } from './furniture';
 import { getModel } from './model';
 import { rayBoxDistance, segmentVisible, STEFAN_BOLTZMANN, type RadiationPatch, type Vec3 } from './radiation';
+import { footprintWalls } from './footprint';
 
 export interface EnvironmentState {
   outsideC: number; windMps: number; windDirectionDeg: number; skyC: number;
@@ -46,10 +47,16 @@ export function wallOutward(side: WallSide): Vec3 {
 }
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 function openingPoint(room: RoomConfig, opening: Opening, u: number, v: number): Vec3 {
+  const wall = footprintWalls(room)[getOpeningWallIndex(room, opening)];
   const along = opening.pos + (u - 0.5) * opening.length;
+  const t = along / wall.length;
   const z = opening.sillM + v * opening.heightM;
-  return opening.side === 'top' ? [along, 1e-6, z] : opening.side === 'bottom' ? [along, room.heightM - 1e-6, z]
-    : opening.side === 'left' ? [1e-6, along, z] : [room.widthM - 1e-6, along, z];
+  return [wall.start.x + (wall.end.x - wall.start.x) * t - wall.normal[0] * 1e-6,
+    wall.start.y + (wall.end.y - wall.start.y) * t - wall.normal[1] * 1e-6, z];
+}
+function openingOutward(room: RoomConfig, opening: Opening): Vec3 {
+  const wall = footprintWalls(room)[getOpeningWallIndex(room, opening)];
+  return [wall.normal[0], wall.normal[1], 0];
 }
 function rayPatch(origin: Vec3, direction: Vec3, p: RadiationPatch): number | null {
   const denom = dot(direction, p.normal);
@@ -79,7 +86,7 @@ export function traceSolar(room: RoomConfig, environment: EnvironmentState, patc
     if (window.kind !== 'window') continue;
     const transmittance = window.open ? 1 : window.solarTransmittance ?? 0.6;
     const area = window.length * window.heightM;
-    const direct = transmittance * area * environment.directWm2 * Math.max(0, dot(wallOutward(window.side), environment.sunDirection));
+    const direct = transmittance * area * environment.directWm2 * Math.max(0, dot(openingOutward(room, window), environment.sunDirection));
     transmittedW += direct;
     if (direct > 0) for (let u = 0; u < 5; u++) for (let v = 0; v < 5; v++) {
       const origin = openingPoint(room, window, (u + 0.5) / 5, (v + 0.5) / 5);

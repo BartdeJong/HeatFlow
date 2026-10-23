@@ -1,5 +1,6 @@
 import { solveVentilation } from './ventilation';
 import { DEFAULT_MODEL, emitterPreset, sanitizeEmitter, sanitizeModel, sanitizeSensor, getModel, wallLayers, roofLayers, floorLayers, type ModelConfig, type SensorConfig, type EmitterConfig } from './model';
+import { footprintWalls, isValidFootprint, nearestFootprintPoint, polygonArea, roomFootprint, type FootprintPoint } from './footprint';
 
 export type WallMaterialId = 'brick' | 'concrete' | 'wood' | 'aerated';
 export type InsulationId = 'mineral' | 'eps' | 'pir';
@@ -78,6 +79,8 @@ export interface Opening {
   id: number;
   kind: OpeningKind;
   side: WallSide;
+  /** Index in the room outline. Missing values are resolved from the legacy side. */
+  wallIndex?: number;
   /** Centre of the opening along its wall, in metres from the wall's start (left or top). */
   pos: number;
   length: number;
@@ -105,6 +108,8 @@ export interface RoomConfig {
   widthM: number;
   /** Length of the room, i.e. its depth into the screen (front to back), m. */
   heightM: number;
+  /** Optional axis-aligned room outline in metres; omitted legacy rooms are rectangular. */
+  footprint?: FootprintPoint[];
   /** Vertical room dimension, metres. heightM is the floor-plan length (y). */
   ceilingM: number;
   /** Outside air temperature, °C. */
@@ -231,6 +236,10 @@ export const DEFAULT_CEILING_FAN: CeilingFanConfig = { speedMps: 1.2, diameterM:
 export const DEFAULT_ROOM: RoomConfig = {
   widthM: 5,
   heightM: 4,
+  footprint: [
+    { x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 2 },
+    { x: 3.75, y: 2 }, { x: 3.75, y: 4 }, { x: 0, y: 4 },
+  ],
   ceilingM: 2.5,
   outsideC: 0,
   convection: true,
@@ -238,7 +247,7 @@ export const DEFAULT_ROOM: RoomConfig = {
   roof: DEFAULT_ROOF,
   thermostat: DEFAULT_THERMOSTAT,
   heatingMode: 'point',
-  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 2, z: 0.4, powerKW: 1.54, emitter: emitterPreset('radiator') }],
+  sources: [{ id: 1, kind: 'heat', x: 2.5, y: 1.5, z: 0.4, powerKW: 1.54, emitter: emitterPreset('radiator') }],
   openings: [],
   probes: [],
   furniture: [],
@@ -286,11 +295,11 @@ export function holdLossW(room: RoomConfig, targetC: number): number {
   const uWall = 1 / (R_SURFACES + resistance(wallLayers(room)));
   const uRoof = 1 / (R_SURFACES + resistance(roofLayers(room)));
   const uFloor = 1 / (0.17 + resistance(floorLayers(room)));
-  const area = room.widthM * room.heightM;
+  const area = polygonArea(roomFootprint(room));
   const floorBoundary = model.floor.boundary === 'outside' ? room.outsideC : model.floor.temperatureC;
   let loss = area * (uRoof * (targetC - room.outsideC) + uFloor * (targetC - floorBoundary));
-  for (const { id } of SIDES) for (const p of wallRegions(room, id)) {
-    const opening = room.openings.findLast(o => o.side === id && Math.abs((p.from + p.to) / 2 - o.pos) < o.length / 2 &&
+  for (const wall of footprintWalls(room)) for (const p of wallRegions(room, wall.index)) {
+    const opening = room.openings.findLast(o => getOpeningWallIndex(room, o) === wall.index && Math.abs((p.from + p.to) / 2 - o.pos) < o.length / 2 &&
       (p.bottom + p.top) / 2 > o.sillM && (p.bottom + p.top) / 2 < o.sillM + o.heightM);
     const u = opening?.open ? 0 : opening ? OPENING_U[opening.kind].closed : uWall;
     loss += u * (p.to - p.from) * (p.top - p.bottom) * (targetC - room.outsideC);
@@ -300,9 +309,11 @@ export function holdLossW(room: RoomConfig, targetC: number): number {
 }
 
 /** Non-overlapping patches of a vertical wall. The last opening wins where openings overlap. */
-export function wallRegions(room: RoomConfig, side: WallSide) {
-  const openings = room.openings.filter((o) => o.side === side);
-  const xs = [...new Set([0, wallLength(room, side), ...openings.flatMap((o) => [o.pos - o.length / 2, o.pos + o.length / 2])])].sort((a, b) => a - b);
+export function wallRegions(room: RoomConfig, wallIndex: number) {
+  const openings = room.openings.filter((o) => getOpeningWallIndex(room, o) === wallIndex);
+  const wall = footprintWalls(room)[wallIndex];
+  if (!wall) return [];
+  const xs = [...new Set([0, wall.length, ...openings.flatMap((o) => [o.pos - o.length / 2, o.pos + o.length / 2])])].sort((a, b) => a - b);
   const zs = [...new Set([0, room.ceilingM, ...openings.flatMap((o) => [o.sillM, o.sillM + o.heightM])])].sort((a, b) => a - b);
   const regions: { from: number; to: number; bottom: number; top: number; u: number; opening: boolean }[] = [];
   for (let z = 1; z < zs.length; z++) for (let x = 1; x < xs.length; x++) {
@@ -335,8 +346,16 @@ export function holdPowerKW(
   return { kW: Math.round(clamped * 100) / 100, reachable: Math.abs(clamped - kW) < 0.005 };
 }
 
-export function wallLength(room: Pick<RoomConfig, 'widthM' | 'heightM'>, side: WallSide): number {
-  return side === 'top' || side === 'bottom' ? room.widthM : room.heightM;
+export function getOpeningWallIndex(room: RoomConfig, opening: Pick<Opening, 'side' | 'wallIndex'>): number {
+  const walls = footprintWalls(room);
+  if (Number.isInteger(opening.wallIndex) && opening.wallIndex! >= 0 && opening.wallIndex! < walls.length) return opening.wallIndex!;
+  return walls.find((wall) => wall.side === opening.side)?.index ?? 0;
+}
+
+export function wallLength(room: Pick<RoomConfig, 'widthM' | 'heightM' | 'footprint'>, side: WallSide | number): number {
+  if (typeof side === 'number') return footprintWalls(room)[side]?.length ?? 0;
+  const matching = footprintWalls(room).filter((wall) => wall.side === side);
+  return matching.reduce((length, wall) => length + wall.length, 0) || (side === 'top' || side === 'bottom' ? room.widthM : room.heightM);
 }
 
 export function nextId(items: ReadonlyArray<{ id: number }>): number {
@@ -409,6 +428,9 @@ export function sanitizeRoom(
 ): RoomConfig {
   const widthM = clamp(c.widthM, LIMITS.size.min, LIMITS.size.max);
   const heightM = clamp(c.heightM, LIMITS.size.min, LIMITS.size.max);
+  const footprint = isValidFootprint(c.footprint, widthM, heightM)
+    ? c.footprint.map((point) => ({ x: point.x, y: point.y }))
+    : undefined;
   const ceilingM = clamp(c.ceilingM ?? DEFAULT_ROOM.ceilingM, LIMITS.size.min, LIMITS.size.max);
   const outsideC = clamp(c.outsideC ?? DEFAULT_ROOM.outsideC, LIMITS.outside.min, LIMITS.outside.max);
 
@@ -432,11 +454,13 @@ export function sanitizeRoom(
   const sources = withIds(
     rawSources.map((s) => {
       const kind = pick(s.kind, ALL_SOURCE_KINDS, 'heat');
+      const location = nearestFootprintPoint({ widthM, heightM, footprint },
+        clamp(s.x, 0, widthM), clamp(s.y, 0, heightM));
       return {
         id: s.id as number,
         kind,
-        x: clamp(s.x, 0, widthM),
-        y: clamp(s.y, 0, heightM),
+        x: location.x,
+        y: location.y,
         z: kind === 'fan' ? ceilingM - 0.12 : clamp(s.z ?? Math.min(0.4, ceilingM / 2), 0, ceilingM),
         powerKW: kind === 'fan' ? 0 : clamp(s.powerKW, LIMITS.power.min, LIMITS.power.max),
         ...(kind === 'fan' ? {
@@ -452,13 +476,19 @@ export function sanitizeRoom(
   const openings = withIds(
     entries<Opening>(c.openings, LIMITS.openings).map((o) => {
       const side = pick(o.side, sideIds, 'top');
-      const wl = wallLength({ widthM, heightM }, side);
+      const walls = footprintWalls({ widthM, heightM, footprint });
+      const wallIndex = Number.isInteger(o.wallIndex) && o.wallIndex! >= 0 && o.wallIndex! < walls.length
+        ? o.wallIndex!
+        : walls.find((wall) => wall.side === side)?.index ?? 0;
+      const wl = wallLength({ widthM, heightM, footprint }, wallIndex);
       const length = clamp(o.length, LIMITS.openingLength.min, Math.max(LIMITS.openingLength.min, wl - 0.2));
       const height = clamp(o.heightM ?? (o.kind === 'door' ? 2.1 : 1.2), 0.3, ceilingM);
+      const wallSide = walls[wallIndex]?.side ?? side;
       return {
         id: o.id as number,
         kind: pick(o.kind, OPENING_KINDS, 'window'),
-        side,
+        side: wallSide,
+        wallIndex,
         pos: clamp(o.pos, length / 2, wl - length / 2),
         length,
         heightM: height,
@@ -470,12 +500,10 @@ export function sanitizeRoom(
   );
 
   const probes = withIds(
-    entries<Probe>(c.probes, LIMITS.probes).map((p) => ({
-      id: p.id as number,
-      x: clamp(p.x, 0, widthM),
-      y: clamp(p.y, 0, heightM),
-      z: clamp(p.z ?? ceilingM / 2, 0, ceilingM),
-    })),
+    entries<Probe>(c.probes, LIMITS.probes).map((p) => {
+      const location = nearestFootprintPoint({ widthM, heightM, footprint }, clamp(p.x, 0, widthM), clamp(p.y, 0, heightM));
+      return { id: p.id as number, x: location.x, y: location.y, z: clamp(p.z ?? ceilingM / 2, 0, ceilingM) };
+    }),
   );
 
   const furniture = withIds(entries<Furniture>(c.furniture, LIMITS.furniture).map((f): Furniture => {
@@ -499,6 +527,9 @@ export function sanitizeRoom(
   return {
     widthM,
     heightM,
+    footprint: footprint ?? [
+      { x: 0, y: 0 }, { x: widthM, y: 0 }, { x: widthM, y: heightM }, { x: 0, y: heightM },
+    ],
     ceilingM,
     outsideC,
     convection: c.convection === true,

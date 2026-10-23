@@ -21,7 +21,6 @@
     INSULATIONS,
     LIMITS,
     ROOF_MATERIALS,
-    SIDES,
     WALL_MATERIALS,
     holdPowerKW,
     roofU,
@@ -31,15 +30,22 @@
     type HeatingMode,
     type RoofMaterialId,
     type WallMaterialId,
-    type WallSide,
   } from '../sim/config';
+  import { footprintWalls } from '../sim/footprint';
   import { PALETTES, PALETTE_IDS } from '../render/palette';
-  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C } from '../render/temperature-scale';
+  import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, gradientOpacityValue } from '../render/temperature-scale';
   import Graph from './Graph.svelte';
   import FurniturePanel from './FurniturePanel.svelte';
   import PhysicsPanel from './PhysicsPanel.svelte';
+  import FloorplanEditor from './FloorplanEditor.svelte';
 
   let holdMsg = $state('');
+
+  function gradientOpacityLabel() {
+    if (!app.showTemperatureGradient) return 'Off';
+    const opacity = gradientOpacityValue(app.gradientOpacity) * 100;
+    return opacity > 0 && opacity < 0.5 ? '<0.5%' : `${Math.round(opacity)}%`;
+  }
 
   function holdSource(id: number) {
     const res = holdPowerKW($state.snapshot(app.room), id, 20);
@@ -62,6 +68,7 @@
   const fanRunning = $derived(app.room.sources.some((s) => s.kind === 'fan' && s.fanEnabled !== false));
   const selectedProbe = $derived(app.selection?.kind === 'probe' ? app.room.probes.find((p) => p.id === app.selection!.id) : undefined);
   const sliceLength = $derived(app.sliceAxis === 'x' ? app.room.widthM : app.sliceAxis === 'y' ? app.room.heightM : app.room.ceilingM);
+  const roomWalls = $derived(footprintWalls(app.room));
 
   const tabs = ['Setup', 'Climate', 'Display', 'Results'] as const;
   let active = $state<(typeof tabs)[number]>('Setup');
@@ -149,6 +156,7 @@
 
     <p class="hint">The room uses X for width, Y for length, and Z for height. Changing the size restarts the simulation. The colour scale stays at {TEMPERATURE_MIN_C}–{TEMPERATURE_MAX_C} °C, with a faint tint near {ROOM_TEMPERATURE_C} °C.</p>
   </fieldset>
+  <FloorplanEditor />
   <fieldset id="inspect-source">
     <legend>Sources</legend>
     <label>
@@ -245,7 +253,7 @@
       </button>
     </div>
     {#each app.room.openings as o (o.id)}
-      {@const len = wallLength(app.room, o.side)}
+      {@const len = wallLength(app.room, o.wallIndex ?? o.side)}
       <div class="opening" class:sel={app.selection?.kind === 'opening' && app.selection.id === o.id}>
         <div class="row">
           <button class="item" onclick={() => select({ kind: 'opening', id: o.id })}>
@@ -264,10 +272,13 @@
         <label>
           Wall
           <select
-            value={o.side}
-            onchange={(e) => updateOpening(o.id, { side: e.currentTarget.value as WallSide })}
+            value={o.wallIndex ?? 0}
+            onchange={(e) => {
+              const wall = roomWalls[Number(e.currentTarget.value)];
+              if (wall) updateOpening(o.id, { wallIndex: wall.index, side: wall.side ?? 'top' });
+            }}
           >
-            {#each SIDES as s}<option value={s.id}>{s.label}</option>{/each}
+            {#each roomWalls as wall}<option value={wall.index}>{wall.side ? wall.side[0].toUpperCase() + wall.side.slice(1) : `Wall ${wall.index + 1}`}</option>{/each}
           </select>
         </label>
         <label>
@@ -468,6 +479,14 @@
           <option value={id}>{PALETTES[id].label}</option>
         {/each}
       </select>
+    </label>
+    <label class="check">
+      <input type="checkbox" bind:checked={app.showTemperatureGradient} />
+      Show temperature gradient
+    </label>
+    <label>
+      <span>Gradient opacity <output>{gradientOpacityLabel()}</output></span>
+      <input type="range" min="0" max="1" step="0.01" bind:value={app.gradientOpacity} disabled={!app.showTemperatureGradient} />
     </label>
     <label>
       View

@@ -2,6 +2,7 @@ import type { RoomConfig } from './config';
 import { fieldVectors, trilerp, weightedTrilerp, type AirStats, type SimulationField, type Vec3 } from './field';
 import { furnitureBoxes, type FurnitureBox } from './furniture';
 import { geometryKey, snapshotBuffers, type SimulationSnapshot, type WorkerCommand } from './protocol';
+import { footprintContains } from './footprint';
 export type { SimulationSnapshot } from './protocol';
 
 /** A stable field object; only the worker owns or advances the simulation. */
@@ -11,11 +12,13 @@ export class SnapshotField implements SimulationField {
   u = new Float64Array(12); v = new Float64Array(12); w = new Float64Array(12);
   private boxes: FurnitureBox[] = [];
   private furnitureTemps: Record<number, number> = {};
+  private room?: RoomConfig;
   apply(snapshot: SimulationSnapshot, room: RoomConfig): ArrayBuffer[] {
     const old = [this.T, this.solid, this.volume, this.u, this.v, this.w].map(a => a.buffer as ArrayBuffer);
     const { nx, ny, nz, dx, dy, dz, T, solid, volume, u, v, w, elapsed, generation } = snapshot;
     Object.assign(this, { nx, ny, nz, dx, dy, dz, T, solid, volume, u, v, w, elapsed, generation });
     this.boxes = room.furniture.flatMap(furnitureBoxes);
+    this.room = room;
     this.furnitureTemps = snapshot.furnitureTemps;
     return old;
   }
@@ -26,7 +29,8 @@ export class SnapshotField implements SimulationField {
     return weightedTrilerp(this.T, this.volume, this.nx, this.ny, this.nz, x / this.dx - .5, y / this.dy - .5, z / this.dz - .5);
   }
   isSolid(x: number, y: number, z: number): boolean {
-    return this.boxes.some(b => [x, y, z].every((n, a) => n >= b.min[a] && n <= b.max[a]));
+    return !this.room || !footprintContains(this.room, x, y) ||
+      this.boxes.some(b => [x, y, z].every((n, a) => n >= b.min[a] && n <= b.max[a]));
   }
   sampleVelocity(x: number, y: number, z: number): Vec3 {
     if (this.isSolid(x, y, z)) return [0, 0, 0];

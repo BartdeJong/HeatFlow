@@ -34,7 +34,8 @@ it.each(PALETTE_IDS)('fades neutral air and shows uniformly warm/cold air in the
     });
     expect(Math.max(...alphas[0])).toBeLessThan(0.04);
     expect(Math.min(...alphas[1])).toBeGreaterThan(0.6);
-    expect(alphas[1]).toEqual(alphas[2]);
+    expect(alphas[1]).toHaveLength(alphas[2].length);
+    alphas[1].forEach((alpha, index) => expect(alpha).toBeCloseTo(alphas[2][index], 12));
   }
 });
 
@@ -49,4 +50,21 @@ it('keeps the same sample appearance across changes to the room temperature dist
   sim.T.fill(40);
   renderer.render(sim, renderView);
   expect(fills).toEqual(before);
+});
+
+it('applies gradient opacity to the entire walk-mode fallback', () => {
+  const { renderer, fills } = fallback('heat');
+  const sim = new Simulation({ ...DEFAULT_ROOM, furniture: [] });
+  sim.T.fill(25);
+  const renderView = { ...view('volume', true), gradientOpacity: 0 };
+
+  renderer.render(sim, renderView);
+  const hidden = fills.map(color => Number(color.slice(color.lastIndexOf(',') + 1, -1)));
+  expect(hidden.length).toBeGreaterThan(0);
+  expect(Math.max(...hidden)).toBe(0);
+
+  renderView.gradientOpacity = 0.5;
+  renderer.render(sim, renderView);
+  const visible = fills.map(color => Number(color.slice(color.lastIndexOf(',') + 1, -1)));
+  expect(Math.max(...visible)).toBeCloseTo(0.47);
 });

@@ -4,7 +4,7 @@ import { DEFAULT_MODEL } from './model';
 import { solveVentilation } from './ventilation';
 import { exteriorConvection, exteriorLongwaveW, getEnvironment, traceSolar } from './environment';
 import type { RadiationPatch } from './radiation';
-const room = (): RoomConfig => ({ ...structuredClone(DEFAULT_ROOM), model: structuredClone(DEFAULT_MODEL), sources: [] });
+const room = (): RoomConfig => ({ ...structuredClone(DEFAULT_ROOM), footprint: undefined, model: structuredClone(DEFAULT_MODEL), sources: [] });
 const targets: RadiationPatch[] = [
   { area: 20, center: [2.5, 2, 0], normal: [0, 0, 1], emissivity: 0.9, tangentU: [2.5, 0, 0], tangentV: [0, 2, 0] },
   { area: 12.5, center: [2.5, 0, 1.25], normal: [0, 1, 0], emissivity: 0.9, tangentU: [2.5, 0, 0], tangentV: [0, 0, 1.25] },

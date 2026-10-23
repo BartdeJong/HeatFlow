@@ -3,7 +3,7 @@ import { DEFAULT_ROOM, coerceRoom, sanitizeRoom, wallU, type RoomConfig } from '
 import { decodeRoom, encodeRoom, roomFromHash, shareUrl } from './share';
 import { DEFAULT_MODEL, getModel } from '../sim/model';
 
-const full: RoomConfig = {
+const full: RoomConfig = sanitizeRoom({
   widthM: 6.5,
   heightM: 3.2,
   ceilingM: 3.4,
@@ -23,7 +23,7 @@ const full: RoomConfig = {
   ],
   probes: [{ id: 1, x: 2, y: 1, z: 1.7 }],
   furniture: [{ id: 1, kind: 'table', material: 'wood', x: 3, y: 1.5, widthM: 1.4, depthM: 0.9, heightM: 0.8, rotation: 90 }],
-};
+});
 
 // Fixed legacy payload: never manufacture old links with the current encoder.
 function v5(): unknown[] {

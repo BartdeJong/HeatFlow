@@ -123,6 +123,14 @@ describe('worker engine and snapshot field', () => {
     expect(snapshot.history.times).toEqual([0]);
   });
 
+  it('rebuilds simulation geometry when the room outline changes', () => {
+    const rectangular = room();
+    const shaped = { ...rectangular, footprint: [
+      { x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 1 }, { x: 8, y: 1 }, { x: 8, y: 2 }, { x: 0, y: 2 },
+    ] };
+    expect(geometryKey(shaped)).not.toBe(geometryKey(rectangular));
+  });
+
   it('recovers a failed solver after a live edit, respecting the latest Play/Pause control', () => {
     const config = room();
     const worker = new WorkerEngine(() => 0, r => {

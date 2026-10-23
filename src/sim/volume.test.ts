@@ -13,6 +13,7 @@ describe('volumetric physics', () => {
   });
   it('partitions all six surfaces with exact fractional opening areas', () => {
     const r = sanitizeRoom({ ...DEFAULT_ROOM, widthM: 3.7, heightM: 6.3, ceilingM: 2.9,
+      footprint: undefined,
       openings: [{ id: 1, kind: 'window', side: 'right', pos: 1.85, length: 1.13, heightM: .93, sillM: 1.17, open: true }] });
     const patches = buildSurfaces(r, 20);
     expect(patches.filter(p => p.kind === 'aperture').reduce((s,p) => s+p.area,0)).toBeCloseTo(1.13*.93, 10);
@@ -26,16 +27,15 @@ describe('volumetric physics', () => {
     expect(holdLossW(single, 20)).toBeCloseTo(holdLossW(double, 20), 6);
     expect(buildSurfaces(double,20).filter(p=>p.kind==='aperture').reduce((s,p)=>s+p.area,0)).toBeCloseTo(1.3*1.1, 9);
   });
-
   it('localizes source power at its height and moves that height live', () => {
-    const r = sanitizeRoom({ ...DEFAULT_ROOM, convection: false, outsideC: 20, model: { ...structuredClone(DEFAULT_MODEL), radiation: false, leakageACH: 0 }, sources: [{ ...DEFAULT_ROOM.sources[0], emitter: undefined, z: 0.4 }] });
+    const r = sanitizeRoom({ ...DEFAULT_ROOM, footprint: undefined, convection: false, outsideC: 20, model: { ...structuredClone(DEFAULT_MODEL), radiation: false, leakageACH: 0 }, sources: [{ ...DEFAULT_ROOM.sources[0], emitter: undefined, z: 0.4 }] });
     const sim = new Simulation(r, { ...DEFAULT_PHYSICS, uScale: 0 });
     sim.advance(0.1);
-    expect(sim.sample(2.5, 2, 0.4)).toBeGreaterThan(20);
-    expect(sim.sample(2.5, 2, 2.1)).toBe(20);
+    expect(sim.sample(r.sources[0].x, r.sources[0].y, 0.4)).toBeGreaterThan(20);
+    expect(sim.sample(r.sources[0].x, r.sources[0].y, 2.1)).toBeCloseTo(20, 12);
     sim.setRoom({ ...r, sources: [{ ...r.sources[0], z: 2.1 }] });
     sim.advance(0.1);
-    expect(sim.sample(2.5, 2, 2.1)).toBeGreaterThan(20);
+    expect(sim.sample(r.sources[0].x, r.sources[0].y, 2.1)).toBeGreaterThan(20);
   });
 
   it('diffuses equally along X, Y and Z in a cubic room', () => {

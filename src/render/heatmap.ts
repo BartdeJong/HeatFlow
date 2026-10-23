@@ -12,6 +12,7 @@ export interface RenderView {
   axis: 'x' | 'y' | 'z';
   fraction: number;
   walkMode?: boolean;
+  gradientOpacity?: number;
   temperatureField?: { T: Float32Array; sample(x: number, y: number, z: number): number };
   furniture?: Furniture[];
   selectedFurnitureId?: number;
@@ -34,7 +35,7 @@ uniform sampler3D uSolid;
 uniform sampler2D uPalette;
 uniform vec3 uSize, uOrigin, uNormal, uRight, uUp;
 uniform vec2 uResolution;
-uniform float uScale, uFraction;
+uniform float uScale, uFraction, uOpacity;
 uniform int uMode, uAxis, uPerspective, uWalkMode;
 uniform int uBoxCount;
 uniform vec4 uBoxMin[72], uBoxMax[72];
@@ -87,10 +88,15 @@ void main() {
     float t = (uSize[uAxis] * uFraction - ro[uAxis]) / dir;
     if (objectT <= roomExit && (t < entry || objectT <= t)) { outColor = vec4(objectColor, 1); return; }
     if (t < entry - 0.0001 || t > exit + 0.0001) { outColor = vec4(0); return; }
+    if (uOpacity <= 0.0) { outColor = vec4(0); return; }
     vec3 pos = ro + rd * t;
     if (texture(uSolid, pos / uSize).r > 0.0) { outColor = vec4(0); return; }
     float temperature = texture(uTemp, pos / uSize).r;
-    outColor = vec4(color(temperature), 0.94 * strength(temperature));
+    outColor = vec4(color(temperature), 0.94 * strength(temperature) * uOpacity);
+    return;
+  }
+  if (uOpacity <= 0.0) {
+    outColor = objectT <= roomExit ? vec4(objectColor, 1.0) : vec4(0.0);
     return;
   }
   // Cloud density follows distance from 20°C, independent of the room's mean.
@@ -109,12 +115,18 @@ void main() {
     sum += (1.0 - opacity) * color(t) * alpha;
     opacity += (1.0 - opacity) * alpha;
   }
+  float temperatureOpacity = opacity;
   float rear = texture(uTemp, (ro + rd * (exit - 0.001)) / uSize).r;
   bool hitFurniture = objectT <= roomExit;
   float rearAlpha = hitFurniture ? 1.0 : (uWalkMode == 1 ? 0.94 : 0.06) * strength(rear);
-  sum += (1.0 - opacity) * (hitFurniture ? objectColor : color(rear)) * rearAlpha;
+  if (hitFurniture) {
+    float gradientAlpha = temperatureOpacity * uOpacity;
+    outColor = vec4(sum * uOpacity + objectColor * (1.0 - gradientAlpha), 1.0);
+    return;
+  }
+  sum += (1.0 - opacity) * color(rear) * rearAlpha;
   opacity += (1.0 - opacity) * rearAlpha;
-  outColor = vec4(sum / max(opacity, 0.001), opacity);
+  outColor = vec4(sum / max(opacity, 0.001), opacity * uOpacity);
 }`;
 
 export function fitCanvas(canvas: HTMLCanvasElement, maxDpr = 1.5): number {
@@ -223,6 +235,7 @@ function createWebGLRenderer(canvas: HTMLCanvasElement, palette: PaletteId): Hea
       gl.uniform1i(uniform('uPerspective'), v.perspective ? 1 : 0);
       gl.uniform1i(uniform('uWalkMode'), view.walkMode ? 1 : 0);
       gl.uniform1f(uniform('uFraction'), view.fraction);
+      gl.uniform1f(uniform('uOpacity'), view.gradientOpacity ?? 1);
       gl.uniform1i(uniform('uMode'), view.mode === 'slice' ? 1 : 0);
       gl.uniform1i(uniform('uAxis'), ['x', 'y', 'z'].indexOf(view.axis));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -270,7 +283,7 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
           const rgb = paletteColor(palette, temperaturePosition(temp));
           const points = [face(x, y), face(x + 1, y), face(x + 1, y + 1), face(x, y + 1)];
           const center = points[0].map((n, i) => (n + points[2][i]) / 2) as Vec3;
-          surfaces.push({ points, color: `rgba(${rgb.join(',')},${0.94 * temperatureStrength(temp)})`, depth: depthOf(center) });
+          surfaces.push({ points, color: `rgba(${rgb.join(',')},${0.94 * temperatureStrength(temp) * (view.gradientOpacity ?? 1)})`, depth: depthOf(center) });
         }
       }
       for (const level of levels) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
@@ -283,7 +296,7 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
         const temp = (view.temperatureField ?? sim).sample(...p);
         const rgb = paletteColor(palette, temperaturePosition(temp));
         const strength = temperatureStrength(temp);
-        const alpha = view.mode === 'slice' ? 0.94 * strength : Math.min(0.65, strength ** 1.5 * 0.8);
+        const alpha = (view.mode === 'slice' ? 0.94 * strength : Math.min(0.65, strength ** 1.5 * 0.8)) * (view.gradientOpacity ?? 1);
         if (alpha < 0.005) continue;
         surfaces.push({ color: `rgba(${rgb.join(',')},${alpha})`, depth: depthOf(p),
           points: [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(([a, b]) => point(a, b)) });

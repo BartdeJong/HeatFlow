@@ -15,6 +15,7 @@ import {
   type ThermostatConfig,
   type WallConfig,
 } from '../sim/config';
+import { footprintCellArea, footprintInteriorPoint, nearestFootprintPoint, type FootprintPoint, footprintWalls } from '../sim/footprint';
 import { Recorder } from '../sim/recorder';
 import { roomFromHash } from '../persist/share';
 import type { PaletteId } from '../render/palette';
@@ -31,10 +32,13 @@ function initialRoom(): RoomConfig {
 }
 
 export const app = $state({
+  focusView: true,
   room: initialRoom(),
   running: true,
   speed: 300 as number,
   palette: 'heat' as PaletteId,
+  showTemperatureGradient: false,
+  gradientOpacity: 1,
   exterior: false,
   showVectors: false,
   view: 'volume' as 'volume' | 'slice',
@@ -65,7 +69,29 @@ function edit(fn: (room: RoomConfig) => void): void {
 export function updateRoom(
   patch: Partial<Pick<RoomConfig, 'widthM' | 'heightM' | 'ceilingM' | 'outsideC' | 'convection' | 'heatingMode'>>,
 ): void {
-  edit((r) => Object.assign(r, patch));
+  edit((r) => {
+    const scaleX = patch.widthM === undefined ? 1 : patch.widthM / r.widthM;
+    const scaleY = patch.heightM === undefined ? 1 : patch.heightM / r.heightM;
+    Object.assign(r, patch);
+    if (r.footprint && (scaleX !== 1 || scaleY !== 1)) {
+      r.footprint = r.footprint.map((point) => ({ x: point.x * scaleX, y: point.y * scaleY }));
+    }
+  });
+}
+
+export function updateFootprint(footprint: FootprintPoint[]): boolean {
+  const room = sanitizeRoom({ ...$state.snapshot(app.room), footprint: footprint.map((point) => ({ ...point })) });
+  const outsideFurniture = room.furniture.some((f) => {
+    const [width, depth] = furnitureExtent(f);
+    return footprintCellArea(room, f.x - width / 2, f.y - depth / 2, f.x + width / 2, f.y + depth / 2) < width * depth - 1e-8;
+  });
+  if (outsideFurniture) {
+    app.placementMessage = 'Move or remove furniture that would fall outside the new floorplan.';
+    return false;
+  }
+  app.placementMessage = '';
+  app.room = room;
+  return true;
 }
 
 export function updateModel(patch: Partial<ModelConfig>): void {
@@ -126,11 +152,12 @@ export function addSource(kind: SourceKind): void {
   const id = nextId(app.room.sources);
   const [fx, fy] = SPOTS[(id - 1) % SPOTS.length];
   edit((r) => {
+    const location = kind === 'fan' ? footprintInteriorPoint(r) : nearestFootprintPoint(r, r.widthM * fx, r.heightM * fy);
     r.sources.push({
       id,
       kind,
-      x: kind === 'fan' ? r.widthM / 2 : r.widthM * fx,
-      y: kind === 'fan' ? r.heightM / 2 : r.heightM * fy,
+      x: location.x,
+      y: location.y,
       z: kind === 'heat' ? 0.4 : kind === 'fan' ? r.ceilingM - 0.12 : Math.max(0.4, r.ceilingM - 0.5),
       powerKW: kind === 'heat' ? 1.5 : kind === 'cold' ? 1 : 0,
       ...(kind === 'fan' ? { fanEnabled: true, fanSpeedMps: 1.2, fanDiameterM: 1.2 } : {}),
@@ -143,7 +170,11 @@ export function addSource(kind: SourceKind): void {
 export function updateSource(id: number, patch: Partial<Omit<HeatSource, 'id'>>): void {
   edit((r) => {
     const s = r.sources.find((x) => x.id === id);
-    if (s) Object.assign(s, patch);
+    if (s) {
+      Object.assign(s, patch);
+      const location = nearestFootprintPoint(r, s.x, s.y);
+      s.x = location.x; s.y = location.y;
+    }
   });
 }
 
@@ -157,12 +188,14 @@ export function removeSource(id: number): void {
 export function addOpening(kind: OpeningKind): void {
   if (app.room.openings.length >= LIMITS.openings) return;
   const id = nextId(app.room.openings);
+  const wall = [...footprintWalls(app.room)].sort((a, b) => b.length - a.length)[0];
   edit((r) => {
     r.openings.push({
       id,
       kind,
-      side: 'top',
-      pos: r.widthM / 2,
+      side: wall.side ?? 'top',
+      wallIndex: wall.index,
+      pos: wall.length / 2,
       length: kind === 'window' ? 1.2 : 0.9,
       heightM: kind === 'window' ? 1.2 : 2.1,
       sillM: kind === 'window' ? 0.8 : 0,
@@ -190,7 +223,8 @@ export function addProbe(): void {
   if (app.room.probes.length >= LIMITS.probes) return;
   const id = nextId(app.room.probes);
   edit((r) => {
-    r.probes.push({ id, x: r.widthM * (0.2 + 0.25 * (id - 1)), y: r.heightM * 0.25, z: r.ceilingM / 2 });
+    const location = nearestFootprintPoint(r, r.widthM * (0.2 + 0.25 * (id - 1)), r.heightM * 0.25);
+    r.probes.push({ id, x: location.x, y: location.y, z: r.ceilingM / 2 });
   });
   app.selection = { kind: 'probe', id };
 }
@@ -208,22 +242,23 @@ export function addFurniture(kind: FurnitureKind): void {
   const id = nextId(app.room.furniture);
   edit((r) => {
     const widthM = Math.min(preset.widthM, r.widthM), depthM = Math.min(preset.depthM, r.heightM);
-    let x = r.widthM / 2, y = depthM / 2;
+    let x = r.widthM / 2, y = depthM / 2, foundPosition = false;
     for (const fy of [0.1, 0.9, 0.5, 0.3, 0.7]) {
       let found = false;
       for (const fx of [0.1, 0.9, 0.5, 0.3, 0.7]) {
         const cx = widthM / 2 + (r.widthM - widthM) * fx;
         const cy = depthM / 2 + (r.heightM - depthM) * fy;
-        const occupied = r.furniture.some((f) => {
+        const outsideRoom = footprintCellArea(r, cx - widthM / 2, cy - depthM / 2, cx + widthM / 2, cy + depthM / 2) < widthM * depthM - 1e-8;
+        const occupied = outsideRoom || r.furniture.some((f) => {
           const [w, d] = furnitureExtent(f);
           return Math.abs(cx - f.x) < (widthM + w) / 2 + 0.1 && Math.abs(cy - f.y) < (depthM + d) / 2 + 0.1;
         }) || r.sources.some((s) => s.kind !== 'fan' && s.z < preset.heightM && Math.abs(cx - s.x) < widthM / 2 + 0.3 && Math.abs(cy - s.y) < depthM / 2 + 0.3);
-        if (!occupied) { x = cx; y = cy; found = true; break; }
+        if (!occupied) { x = cx; y = cy; found = true; foundPosition = true; break; }
       }
       if (found) break;
     }
     const candidate: Furniture = { id, kind, material: preset.material, x, y, widthM, depthM, heightM: preset.heightM, rotation: 0 };
-    if (r.furniture.some((f) => furnitureOverlap(f, candidate))) {
+    if (!foundPosition || r.furniture.some((f) => furnitureOverlap(f, candidate))) {
       app.placementMessage = 'No space for this furniture. Move an item or choose a smaller size.';
       return;
     }
@@ -236,6 +271,14 @@ export function addFurniture(kind: FurnitureKind): void {
 export function updateFurniture(id: number, patch: Partial<Omit<Furniture, 'id'>>): void {
   const room = sanitizeRoom({ ...$state.snapshot(app.room), furniture: app.room.furniture.map((f) => f.id === id ? { ...f, ...patch } : f) });
   const candidate = room.furniture.find((f) => f.id === id);
+  if (candidate) {
+    const [width, depth] = furnitureExtent(candidate);
+    if (footprintCellArea(room, candidate.x - width / 2, candidate.y - depth / 2,
+      candidate.x + width / 2, candidate.y + depth / 2) < width * depth - 1e-8) {
+      app.placementMessage = 'Furniture must remain inside the floorplan.';
+      return;
+    }
+  }
   if (candidate && room.furniture.some((f) => f.id !== id && furnitureOverlap(f, candidate))) {
     app.placementMessage = 'Furniture cannot overlap. Choose a free position or smaller dimensions.';
     return;
@@ -255,10 +298,13 @@ export function moveItem(kind: 'source' | 'probe' | 'furniture', id: number, x: 
   if (kind === 'furniture') { updateFurniture(id, { x, y }); return; }
   edit((r) => {
     const item = (kind === 'source' ? r.sources : r.probes).find((i) => i.id === id);
-    if (item) Object.assign(item, {
-      x, y,
+    if (item) {
+      const location = nearestFootprintPoint(r, x, y);
+      Object.assign(item, {
+      x: location.x, y: location.y,
       ...(z === undefined ? {} : { z: kind === 'source' && 'kind' in item && item.kind === 'fan' ? r.ceilingM - 0.12 : z }),
     });
+    }
   });
   if (kind === 'probe') {
     recorder.clearSeries(`p${id}`);

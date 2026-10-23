@@ -8,6 +8,11 @@ export function temperaturePosition(temperatureC: number): number {
   return Math.max(0, Math.min(1, (temperatureC - TEMPERATURE_MIN_C) / (TEMPERATURE_MAX_C - TEMPERATURE_MIN_C)));
 }
 
+export function gradientOpacityValue(control: number): number {
+  const value = Math.max(0, Math.min(1, control));
+  return value * value;
+}
+
 /** A faint tint at room temperature, smoothly reaching full strength at ±5°C. */
 export function temperatureStrength(temperatureC: number): number {
   const x = Math.min(1, Math.abs(temperatureC - ROOM_TEMPERATURE_C) / (TEMPERATURE_MAX_C - ROOM_TEMPERATURE_C));

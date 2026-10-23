@@ -1,5 +1,6 @@
 import type { RoomConfig } from './config';
 import { furnitureBoxes, unionBoxVolume, unionRectangleArea, type FurnitureBox, type Point3 } from './furniture';
+import { footprintCellArea, footprintLineIntervals, footprintRectangles } from './footprint';
 
 /** Exact axis-aligned cut-cell geometry. Volumes remain unmerged for heat accounting. */
 export class GridGeometry {
@@ -18,12 +19,15 @@ export class GridGeometry {
     this.volume = new Float64Array(n); this.solid = new Uint8Array(n);
     this.representative = Int32Array.from({ length: n }, (_, i) => i);
     this.furnitureVolumes = room.furniture.map(() => new Float64Array(n));
-    const parts = room.furniture.map(furnitureBoxes), boxes = parts.flat();
+    const rectangles = footprintRectangles(room);
+    const parts = room.furniture.map((furniture) => clipToFootprint(furnitureBoxes(furniture), rectangles));
+    const boxes = parts.flat();
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const index = this.index(i, j, k);
       const min: Point3 = [i * this.dx, j * this.dy, k * this.dz];
       const max: Point3 = [(i + 1) * this.dx, (j + 1) * this.dy, (k + 1) * this.dz];
-      this.volume[index] = Math.max(0, cellVolume - unionBoxVolume(clipBoxes(boxes, min, max)));
+      const roomVolume = footprintCellArea(room, min[0], min[1], max[0], max[1]) * this.dz;
+      this.volume[index] = Math.max(0, roomVolume - unionBoxVolume(clipBoxes(boxes, min, max)));
       if (this.volume[index] < cellVolume * 1e-10) { this.volume[index] = 0; this.solid[index] = 1; }
       parts.forEach((item, f) => { this.furnitureVolumes[f][index] = unionBoxVolume(clipBoxes(item, min, max)); });
     }
@@ -41,7 +45,10 @@ export class GridGeometry {
         // A box ending exactly at a face still blocks transport through that face.
         const rects = boxes.filter((box) => box.min[axis] <= plane + 1e-12 && box.max[axis] >= plane - 1e-12)
           .map((box) => [Math.max(loA, box.min[a]), Math.min(hiA, box.max[a]), Math.max(loB, box.min[b]), Math.min(hiB, box.max[b])] as [number, number, number, number]);
-        const open = Math.max(0, spacings[a] * spacings[b] - unionRectangleArea(rects));
+        const baseArea = axis === 2
+          ? footprintCellArea(room, loA, loB, hiA, hiB)
+          : footprintFaceLength(room, axis as 0 | 1, plane, axis === 0 ? loA : loB, axis === 0 ? hiA : hiB);
+        const open = Math.max(0, baseArea * (axis === 2 ? 1 : this.dz) - unionRectangleArea(rects));
         areas[axis][i + counts[0] * (j + counts[1] * k)] = open < spacings[a] * spacings[b] * 1e-10 ? 0 : open;
       }
     }
@@ -73,4 +80,26 @@ export class GridGeometry {
 function clipBoxes(boxes: FurnitureBox[], min: Point3, max: Point3): FurnitureBox[] {
   return boxes.filter((b) => b.min.every((v, a) => v < max[a] && b.max[a] > min[a]))
     .map((b) => ({ ...b, min: b.min.map((v, a) => Math.max(min[a], v)) as Point3, max: b.max.map((v, a) => Math.min(max[a], v)) as Point3 }));
+}
+
+function clipToFootprint(boxes: FurnitureBox[], rectangles: ReturnType<typeof footprintRectangles>): FurnitureBox[] {
+  return boxes.flatMap((box) => rectangles.flatMap((rect) => {
+    const min: Point3 = [Math.max(box.min[0], rect.x0), Math.max(box.min[1], rect.y0), box.min[2]];
+    const max: Point3 = [Math.min(box.max[0], rect.x1), Math.min(box.max[1], rect.y1), box.max[2]];
+    return min[0] < max[0] && min[1] < max[1] ? [{ ...box, min, max }] : [];
+  }));
+}
+
+function footprintFaceLength(room: RoomConfig, axis: 0 | 1, plane: number, start: number, end: number): number {
+  const max = axis === 0 ? room.widthM : room.heightM;
+  const epsilon = Math.min(1e-6, (end - start) * 1e-4);
+  const lower = plane > epsilon ? footprintLineIntervals(room, axis, plane - epsilon) : undefined;
+  const upper = plane < max - epsilon ? footprintLineIntervals(room, axis, plane + epsilon) : undefined;
+  const intervals = lower && upper
+    ? lower.flatMap(([a, b]) => upper.flatMap(([c, d]) => {
+      const lo = Math.max(a, c, start), hi = Math.min(b, d, end);
+      return hi > lo ? [[lo, hi] as [number, number]] : [];
+    }))
+    : (lower ?? upper ?? []);
+  return intervals.reduce((length, [a, b]) => length + Math.max(0, Math.min(b, end) - Math.max(a, start)), 0);
 }

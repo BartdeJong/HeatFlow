@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { PALETTE_IDS, paletteColor, paletteCssGradient } from './palette';
-import { temperaturePosition, temperatureStrength } from './temperature-scale';
+import { gradientOpacityValue, temperaturePosition, temperatureStrength } from './temperature-scale';
 
 it('anchors colours to 15–25°C and clamps temperatures outside the scale', () => {
   expect([-40, 15, 20, 25, 80].map(temperaturePosition)).toEqual([0, 0, 0.5, 1, 1]);
@@ -24,6 +24,12 @@ it('keeps a faint neutral tint and increases opacity smoothly and symmetrically'
   for (const temperature of [-40, 15, 25, 80]) expect(temperatureStrength(temperature)).toBe(1);
   expect(temperatureStrength(20.001) - temperatureStrength(20)).toBeLessThan(0.000001);
   expect(temperatureStrength(25) - temperatureStrength(24.999)).toBeLessThan(0.000001);
+});
+
+it('gives the gradient opacity slider finer control at low settings', () => {
+  expect([0, 0.25, 0.5, 1].map(gradientOpacityValue)).toEqual([0, 0.0625, 0.25, 1]);
+  expect(gradientOpacityValue(-1)).toBe(0);
+  expect(gradientOpacityValue(2)).toBe(1);
 });
 
 it.each(PALETTE_IDS)('shows the neutral fade in the %s legend', palette => {

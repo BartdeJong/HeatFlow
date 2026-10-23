@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_ROOM, type Furniture } from './config';
 import { furnitureOverlap, furnitureOverlaps, furnitureVolume } from './furniture';
 import { GridGeometry } from './grid';
+import { polygonArea, roomFootprint } from './footprint';
 const table: Furniture = { id: 1, kind: 'table', material: 'wood', x: 2.1, y: 2.1, widthM: 1.4, depthM: 0.9, heightM: 0.8, rotation: 0 };
 const sum = (values: Float64Array) => values.reduce((a, b) => a + b, 0);
 describe('exact cut-cell furniture', () => {
@@ -11,7 +12,7 @@ describe('exact cut-cell furniture', () => {
     for (const n of [10, 17, 24]) for (const offset of [0, 0.073]) {
       const g = new GridGeometry({ ...DEFAULT_ROOM, furniture: [{ ...table, x: table.x + offset }] }, n, n, n);
       expect(sum(g.furnitureVolumes[0])).toBeCloseTo(exact, 11);
-      expect(sum(g.volume) + exact).toBeCloseTo(50, 10);
+      expect(sum(g.volume) + exact).toBeCloseTo(polygonArea(roomFootprint(DEFAULT_ROOM)) * DEFAULT_ROOM.ceilingM, 10);
     }
   });
   it('retains separate solid capacity in partially occupied cells and open leg faces', () => {
