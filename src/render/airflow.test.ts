@@ -2,10 +2,20 @@ import { expect, it } from 'vitest';
 import { DEFAULT_MODEL } from '../sim/model';
 import { DEFAULT_ROOM } from '../sim/config';
 import { Simulation } from '../sim/simulation';
-import { AirflowTrails, airflowHighlight, traceAirflow } from './airflow';
+import { AirflowTrails, airflowGridDimensions, airflowHighlight, traceAirflow } from './airflow';
 const testRoom = { ...structuredClone(DEFAULT_ROOM), widthM: 5, heightM: 4, interiorWalls: [],
   footprint: [{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 2 }, { x: 3.75, y: 2 }, { x: 3.75, y: 4 }, { x: 0, y: 4 }] };
 const model = { ...structuredClone(DEFAULT_MODEL), quality: 'coarse' as const, radiation: false, leakageACH: 0, floor: { ...structuredClone(DEFAULT_MODEL.floor), boundary: 'adjacent' as const, temperatureC: 20 }, environment: { ...DEFAULT_MODEL.environment, skyOffsetC: 0 } };
+
+it('scales the airflow seed grid with room volume while preserving minimum and maximum counts', () => {
+  const count = (size: [number, number, number]) => airflowGridDimensions(size).reduce((product, axis) => product * axis, 1);
+  expect(airflowGridDimensions([5, 4, 2.5])).toEqual([5, 4, 3]);
+  expect(count([2, 2, 2])).toBeGreaterThanOrEqual(24);
+  expect(count([2, 2, 2])).toBeLessThan(count([5, 4, 2.5]));
+  expect(count([12.7, 9, 2.5])).toBeGreaterThan(count([5, 4, 2.5]));
+  expect(count([12.7, 9, 2.5])).toBeLessThanOrEqual(144);
+  expect(count([15, 15, 15])).toBeLessThanOrEqual(144);
+});
 
 it('shows no airflow in still air', () => {
   const sim = new Simulation({ ...testRoom, convection: true, sources: [], outsideC: 20, model });

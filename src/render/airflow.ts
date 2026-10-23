@@ -13,6 +13,41 @@ interface Trail {
 
 const TRANSITION_SECONDS = 0.25;
 const REFERENCE_FLOW_SPEED_MPS = 0.2;
+const REFERENCE_GRID_TRAILS = 60;
+const REFERENCE_ROOM_VOLUME_M3 = 5 * 4 * 2.5;
+const MIN_GRID_TRAILS = 24;
+const MAX_GRID_TRAILS = 144;
+
+/** Keep airflow seed density roughly proportional to room volume within a bounded grid size. */
+export function airflowGridDimensions(size: Vec3): Vec3 {
+  const rawCount = REFERENCE_GRID_TRAILS * size[0] * size[1] * size[2] / REFERENCE_ROOM_VOLUME_M3;
+  const targetCount = Math.max(MIN_GRID_TRAILS, Math.min(MAX_GRID_TRAILS, Math.round(rawCount)));
+  const scale = Math.cbrt(targetCount / rawCount);
+  const ideal: Vec3 = [size[0] * scale, size[1] * scale, size[2] * 1.2 * scale];
+  const minimum: Vec3 = [1, 1, 3];
+  const dimensions: Vec3 = [
+    Math.max(minimum[0], Math.round(ideal[0])),
+    Math.max(minimum[1], Math.round(ideal[1])),
+    Math.max(minimum[2], Math.round(ideal[2])),
+  ];
+
+  while (dimensions[0] * dimensions[1] * dimensions[2] > MAX_GRID_TRAILS) {
+    let axis = -1;
+    let greatestOverage = -Infinity;
+    for (let i = 0; i < dimensions.length; i++) {
+      if (dimensions[i] <= minimum[i]) continue;
+      const overage = dimensions[i] / ideal[i];
+      if (overage > greatestOverage) {
+        greatestOverage = overage;
+        axis = i;
+      }
+    }
+    if (axis < 0) break;
+    dimensions[axis]--;
+  }
+
+  return dimensions;
+}
 
 /** Crossfade intact streamlines rather than moving their vertices through furniture. */
 export class AirflowTrails {

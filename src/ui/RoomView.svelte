@@ -3,7 +3,7 @@
   import { onMount, untrack } from 'svelte';
   import { createRenderer, fitCanvas, type HeatmapRenderer } from '../render/heatmap';
   import { defaultCamera, dot, pointOnPlane, project, screenRay, viewTransform, walkTransform, type Camera, type Vec3, type ViewTransform } from '../render/camera';
-  import { AirflowTrails, airflowHighlight } from '../render/airflow';
+  import { AirflowTrails, airflowGridDimensions, airflowHighlight } from '../render/airflow';
   import { TemperatureDisplay } from '../render/temperature';
   import { TEMPERATURE_MIN_C, ROOM_TEMPERATURE_C, TEMPERATURE_MAX_C, gradientOpacityValue, temperaturePosition } from '../render/temperature-scale';
   import { SimulationClient } from '../sim/runtime';
@@ -382,8 +382,15 @@
     }
     if (app.view === 'volume' && (app.room.convection || (fan !== undefined && fan.fanEnabled !== false)) && app.showAirflow) {
       const seeds: Vec3[] = [];
-      for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) {
-        const point: Vec3 = [w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)];
+      const [gridX, gridY, gridZ] = airflowGridDimensions([w, l, h]);
+      const fraction = (index: number, count: number, min: number, max: number) =>
+        count === 1 ? (min + max) / 2 : min + index * (max - min) / (count - 1);
+      for (let z = 0; z < gridZ; z++) for (let y = 0; y < gridY; y++) for (let x = 0; x < gridX; x++) {
+        const point: Vec3 = [
+          w * fraction(x, gridX, 0.1, 0.9),
+          l * fraction(y, gridY, 0.1, 0.9),
+          h * fraction(z, gridZ, 0.15, 0.85),
+        ];
         if (footprintContains(app.room, point[0], point[1])) seeds.push(point);
       }
       // Extra seeds around each source reveal its plume and the returning circulation.
