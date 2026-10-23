@@ -3,7 +3,7 @@ import { DEFAULT_MODEL, emitterPreset, sanitizeEmitter, sanitizeModel, sanitizeS
 
 export type WallMaterialId = 'brick' | 'concrete' | 'wood' | 'aerated';
 export type InsulationId = 'mineral' | 'eps' | 'pir';
-export type SourceKind = 'heat' | 'cold';
+export type SourceKind = 'heat' | 'cold' | 'fan';
 export type HeatingMode = 'point' | 'underfloor';
 export type OpeningKind = 'window' | 'door';
 export type WallSide = 'top' | 'right' | 'bottom' | 'left';
@@ -65,6 +65,12 @@ export interface HeatSource {
   z: number;
   /** Output magnitude in kW. Cold sources remove this much heat. */
   powerKW: number;
+  /** Fan airflow speed, m/s. Used only by ceiling-fan sources. */
+  fanSpeedMps?: number;
+  /** Fan blade diameter, metres. Used only by ceiling-fan sources. */
+  fanDiameterM?: number;
+  /** Whether the ceiling fan is currently running. */
+  fanEnabled?: boolean;
   emitter?: EmitterConfig;
 }
 
@@ -86,6 +92,12 @@ export interface Probe {
   x: number;
   y: number;
   z: number;
+}
+
+export interface CeilingFanConfig {
+  /** Downward air speed under the fan, m/s. */
+  speedMps: number;
+  diameterM: number;
 }
 
 /** Volumetric room: x is width, y is floor-plan length, z is height above floor. */
@@ -168,7 +180,9 @@ export const SIDES: ReadonlyArray<{ id: WallSide; label: string }> = [
 ];
 
 export const OPENING_KINDS: ReadonlyArray<OpeningKind> = ['window', 'door'];
-export const SOURCE_KINDS: ReadonlyArray<SourceKind> = ['heat', 'cold'];
+/** The compact v1–v5 share formats encode these two source kinds by index. */
+export const SOURCE_KINDS: ReadonlyArray<'heat' | 'cold'> = ['heat', 'cold'];
+export const ALL_SOURCE_KINDS: ReadonlyArray<SourceKind> = ['heat', 'cold', 'fan'];
 
 /** Combined inside + outside surface resistance, m²K/W. */
 const R_SURFACES = 0.17;
@@ -211,6 +225,8 @@ export const DEFAULT_THERMOSTAT: ThermostatConfig = {
   deadbandC: 0.5,
   sensor: { mode: 'point', x: 2.5, y: 2, z: 1.1, lagSeconds: 30 },
 };
+
+export const DEFAULT_CEILING_FAN: CeilingFanConfig = { speedMps: 1.2, diameterM: 1.2 };
 
 export const DEFAULT_ROOM: RoomConfig = {
   widthM: 5,
@@ -308,10 +324,10 @@ export function holdPowerKW(
   targetC = 20,
 ): { kW: number; reachable: boolean } | null {
   const src = room.sources.find((s) => s.id === sourceId);
-  if (!src) return null;
+  if (!src || src.kind === 'fan') return null;
   let others = 0;
   for (const s of room.sources) {
-    if (s.id !== sourceId) others += (s.kind === 'cold' ? -1 : 1) * s.powerKW * 1000;
+    if (s.id !== sourceId && s.kind !== 'fan') others += (s.kind === 'cold' ? -1 : 1) * s.powerKW * 1000;
   }
   const net = holdLossW(room, targetC) - others;
   const kW = (src.kind === 'cold' ? -net : net) / 1000;
@@ -387,6 +403,8 @@ export function sanitizeRoom(
   c: Partial<Omit<RoomConfig, 'roof' | 'thermostat'>> & {
     roof?: Partial<RoofConfig>;
     thermostat?: Partial<ThermostatConfig>;
+    /** Read legacy WIP room saves where the fan was stored outside sources. */
+    fan?: Partial<CeilingFanConfig> & { enabled?: boolean };
   },
 ): RoomConfig {
   const widthM = clamp(c.widthM, LIMITS.size.min, LIMITS.size.max);
@@ -394,16 +412,41 @@ export function sanitizeRoom(
   const ceilingM = clamp(c.ceilingM ?? DEFAULT_ROOM.ceilingM, LIMITS.size.min, LIMITS.size.max);
   const outsideC = clamp(c.outsideC ?? DEFAULT_ROOM.outsideC, LIMITS.outside.min, LIMITS.outside.max);
 
+  let rawSources = entries<HeatSource>(c.sources, LIMITS.sources);
+  const hasFanSource = rawSources.some((s) => s.kind === 'fan');
+  const fanSpeed = clamp(c.fan?.speedMps ?? DEFAULT_CEILING_FAN.speedMps, 0.3, 2.5);
+  const fanDiameter = clamp(c.fan?.diameterM ?? DEFAULT_CEILING_FAN.diameterM, 0.5, 2);
+  // Preserve any fan created by the earlier room-level UI while making it a normal movable source.
+  if (c.fan?.enabled === true && !hasFanSource && rawSources.length < LIMITS.sources) {
+    const id = rawSources.reduce((max, source) => Math.max(max, Number.isInteger(source.id) ? source.id! : 0), 0) + 1;
+    rawSources.push({ id, kind: 'fan', x: widthM / 2, y: heightM / 2, z: ceilingM - 0.12, powerKW: 0,
+      fanSpeedMps: fanSpeed, fanDiameterM: fanDiameter });
+  }
+  let foundFan = false;
+  rawSources = rawSources.filter((source) => {
+    if (source.kind !== 'fan') return true;
+    if (foundFan) return false;
+    foundFan = true;
+    return true;
+  });
   const sources = withIds(
-    entries<HeatSource>(c.sources, LIMITS.sources).map((s) => ({
-      id: s.id as number,
-      kind: pick(s.kind, SOURCE_KINDS, 'heat'),
-      x: clamp(s.x, 0, widthM),
-      y: clamp(s.y, 0, heightM),
-      z: clamp(s.z ?? Math.min(0.4, ceilingM / 2), 0, ceilingM),
-      powerKW: clamp(s.powerKW, LIMITS.power.min, LIMITS.power.max),
-      ...(sanitizeEmitter(s.emitter) ? { emitter: sanitizeEmitter(s.emitter) } : {}),
-    })),
+    rawSources.map((s) => {
+      const kind = pick(s.kind, ALL_SOURCE_KINDS, 'heat');
+      return {
+        id: s.id as number,
+        kind,
+        x: clamp(s.x, 0, widthM),
+        y: clamp(s.y, 0, heightM),
+        z: kind === 'fan' ? ceilingM - 0.12 : clamp(s.z ?? Math.min(0.4, ceilingM / 2), 0, ceilingM),
+        powerKW: kind === 'fan' ? 0 : clamp(s.powerKW, LIMITS.power.min, LIMITS.power.max),
+        ...(kind === 'fan' ? {
+          fanEnabled: s.fanEnabled !== false,
+          fanSpeedMps: clamp(s.fanSpeedMps ?? fanSpeed, 0.3, 2.5),
+          fanDiameterM: clamp(s.fanDiameterM ?? fanDiameter, 0.5, 2),
+        } : {}),
+        ...(kind !== 'fan' && sanitizeEmitter(s.emitter) ? { emitter: sanitizeEmitter(s.emitter) } : {}),
+      };
+    }),
   );
 
   const openings = withIds(

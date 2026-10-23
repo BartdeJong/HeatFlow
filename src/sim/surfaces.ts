@@ -65,7 +65,7 @@ export function buildSurfaces(room: RoomConfig, initialC: number): Surface[] {
     } });
   });
   room.sources.forEach((s, source) => {
-    const e = getEmitter(s); if (e.kind === 'ideal' || s.kind === 'cold') return;
+    const e = getEmitter(s); if (e.kind === 'ideal' || s.kind === 'cold' || s.kind === 'fan') return;
     const size = [e.widthM, e.depthM, e.heightM];
     for (let axis = 0; axis < 3; axis++) for (const sign of [-1, 1]) {
       const min = [s.x, s.y, s.z].map((n, d) => Math.max(0, n - size[d] / 2)) as Point3;

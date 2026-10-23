@@ -1,4 +1,4 @@
-import { DEFAULT_PHYSICS, FURNITURE_MATERIALS, type PhysicsParams, type RoomConfig } from './config';
+import { DEFAULT_CEILING_FAN, DEFAULT_PHYSICS, FURNITURE_MATERIALS, type PhysicsParams, type RoomConfig } from './config';
 import { getModel, getEmitter } from './model';
 import { GridGeometry } from './grid';
 import { FlowSolver, type BoundaryFlow } from './flow';
@@ -61,6 +61,15 @@ export class Simulation implements SimulationField {
   private lastFlow = { residual: 0, maxDivergence: 0, iterations: 0 };
   private ventilationACH = 0; private solarW = 0;
   private lastEnvironment: ReturnType<typeof getEnvironment>;
+
+  private fanActuator() {
+    const source = this.room.sources.find(s => s.kind === 'fan');
+    return source && source.fanEnabled !== false ? {
+      x: source.x, y: source.y,
+      speedMps: source.fanSpeedMps ?? DEFAULT_CEILING_FAN.speedMps,
+      diameterM: source.fanDiameterM ?? DEFAULT_CEILING_FAN.diameterM,
+    } : undefined;
+  }
 
   constructor(room: RoomConfig, params: PhysicsParams = DEFAULT_PHYSICS) {
     if (furnitureOverlaps(room.furniture).length) throw new Error('Furniture overlaps: move or remove the highlighted pieces before starting.');
@@ -134,7 +143,8 @@ export class Simulation implements SimulationField {
       const total = entries.reduce((sum, i) => sum + this.capacity[i], 0);
       return { cells: Int32Array.from(entries), weights: Float64Array.from(entries, i => this.capacity[i] / total) };
     });
-    const key = JSON.stringify([room.openings, room.wall, room.roof, room.model?.floor, room.model?.wallLayers, room.model?.roofLayers, room.sources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
+    const thermalSources = room.sources.filter(s => s.kind !== 'fan');
+    const key = JSON.stringify([room.openings, room.wall, room.roof, room.model?.floor, room.model?.wallLayers, room.model?.roofLayers, thermalSources.map(s => [s.id, s.kind, s.x, s.y, s.z, s.emitter])]);
     if (key !== this.surfaceKey) {
       const previous = new Map(this.surfaces.map(s => [s.id, s]));
       this.surfaces = buildSurfaces(room, this.params.initialC);
@@ -195,6 +205,7 @@ export class Simulation implements SimulationField {
     let limit = 1;
     const rates = new Float64Array(this.T.length);
     this.room.sources.forEach((source, j) => {
+      if (source.kind === 'fan') return;
       const emitter = getEmitter(source), power = source.powerKW * 1000;
       if (!power || (source.kind === 'heat' && !this.thermostatHeating)) return;
       if (this.room.heatingMode === 'underfloor' && source.kind === 'heat') return;
@@ -216,7 +227,8 @@ export class Simulation implements SimulationField {
     if (!Number.isFinite(seconds) || seconds <= 0 || this.failed) return 0;
     let done = 0;
     for (let attempt = 0, count = 0; attempt < maxSteps + 16 && count < maxSteps && done < seconds - 1e-10; attempt++) {
-      let dt = Math.min(seconds - done, this.recommendedDt, this.thermalStableDt(), 1, this.advecting || this.convection ? this.flow.stableDt(1, this.convection ? this.T : undefined) : 1);
+      let dt = Math.min(seconds - done, this.recommendedDt, this.thermalStableDt(), 1,
+        this.advecting || this.convection || this.fanActuator() ? this.flow.stableDt(1, this.convection ? this.T : undefined, this.fanActuator()) : 1);
       if (!Number.isFinite(dt) || dt <= 0) dt = Math.min(seconds - done, .05);
       // Radiation/emitter stiffness and explicit thermal diffusion restrict this further below.
       const alpha = Math.max(this.params.alpha, this.params.convectionAlpha, ...[this.flow.eddyDiffusivity?.reduce((m, x) => Math.max(m, x), 0) ?? 0]);
@@ -271,7 +283,7 @@ export class Simulation implements SimulationField {
     let ventDt = Infinity;
     for (const r of this.groups) if (ventilationRates[r]) ventDt = Math.min(ventDt, .5 * this.groupCapacity[r] / ventilationRates[r]);
     if (dt > ventDt * 1.00001) { this.recommendedDt = ventDt; return false; }
-    this.advecting = this.convection || ventilation.inflowM3s > 1e-10 || [this.flow.u, this.flow.v, this.flow.w].some(v => v.some(n => Math.abs(n) > 1e-6));
+    this.advecting = this.convection || !!this.fanActuator() || ventilation.inflowM3s > 1e-10 || [this.flow.u, this.flow.v, this.flow.w].some(v => v.some(n => Math.abs(n) > 1e-6));
     let ventilationJ = 0;
     if (this.advecting) {
       const u = this.flow.u.slice(), v = this.flow.v.slice(), w = this.flow.w.slice();
@@ -281,9 +293,10 @@ export class Simulation implements SimulationField {
         const steps = 2 ** attempt, step = dt / steps;
         converged = true;
         for (let n = 0; n < steps; n++) {
-          const flow = this.flow.step(this.T, step, boundaries, this.convection);
+          const fan = this.fanActuator();
+          const flow = this.flow.step(this.T, step, boundaries, this.convection, fan);
           this.lastFlow = flow;
-          if (!flow.converged || this.flow.stableDt(step, this.convection ? this.T : undefined) < step * .999) { converged = false; break; }
+          if (!flow.converged || this.flow.stableDt(step, this.convection ? this.T : undefined, fan) < step * .999) { converged = false; break; }
         }
       }
       if (!converged) {
@@ -305,9 +318,10 @@ export class Simulation implements SimulationField {
     } else this.thermostatHeating = true;
     this.loss = emptyLoss();
     this.externalJ += ventilationJ; this.exchangedJ += Math.abs(ventilationJ); this.loss.ventilationW = -ventilationJ / dt;
-    const powers = this.room.sources.map(s => s.kind === 'cold' ? -1000 * s.powerKW : this.thermostatHeating ? 1000 * s.powerKW : 0);
+    const powers = this.room.sources.map(s => s.kind === 'fan' ? 0 : s.kind === 'cold' ? -1000 * s.powerKW : this.thermostatHeating ? 1000 * s.powerKW : 0);
     let floorPower = 0;
     this.room.sources.forEach((s, j) => {
+      if (s.kind === 'fan') return;
       const watts = powers[j]; if (watts > 0) this.heatingJ += watts * dt; else this.coolingJ -= watts * dt;
       if (this.room.heatingMode === 'underfloor' && s.kind === 'heat') floorPower += watts;
       else if (getEmitter(s).kind !== 'ideal' && s.kind === 'heat') this.emitters[j].temperature += watts * dt / Math.max(1, this.emitters[j].capacity);

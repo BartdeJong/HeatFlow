@@ -18,6 +18,7 @@ Legend: ✅ implemented · ⬜ future work or unverified acceptance
 - ✅ Wind/stack pressure-network ventilation, bidirectional openings and closed-envelope leakage
 - ✅ Separate construction and ventilation loss accounting
 - ✅ Staggered 3D momentum, physical viscosity, no-slip surfaces and Smagorinsky mixing
+- ✅ Optional ceiling-fan source with on/off control, adjustable downwash and movable X/Y position, independent of buoyancy
 - ✅ Conservative bounded second-order heat transport and adaptive CFL-limited steps
 - ✅ Residual pressure convergence, separate disconnected air regions and failure diagnostics
 - ✅ Deterministic daily weather, orientation, window solar transmittance and furniture shading
@@ -27,9 +28,9 @@ Legend: ✅ implemented · ⬜ future work or unverified acceptance
 ## Interaction and runtime
 
 - ✅ Rotatable/zoomable 3D heat clouds, X/Y/Z slices, hover readouts and palettes
-- ✅ Source/probe dragging, Shift-drag height, keyboard movement and coordinate controls
+- ✅ Heat, cold, ceiling-fan and probe source controls; dragging and coordinate placement, with fan mount fixed to ceiling
 - ✅ Placeable/resizable/rotatable sofas, tables, cabinets and beds
-- ✅ Airflow trails, heat-flow arrows and translucent illustrated house exterior
+- ✅ Airflow trails, heat-flow arrows, animated ceiling fan and translucent illustrated house exterior
 - ✅ Main-thread rendering with a module-worker solver and transferable field snapshots
 - ✅ Stable display field identity; generation/revision rejection of stale snapshots
 - ✅ Worker-side histories sampled in simulated time and achieved-speed reporting

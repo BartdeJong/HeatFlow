@@ -57,6 +57,8 @@
       : undefined,
   );
   const heatingPowerKW = $derived(app.room.sources.filter((s) => s.kind === 'heat').reduce((sum, s) => sum + s.powerKW, 0));
+  const hasCeilingFan = $derived(app.room.sources.some((s) => s.kind === 'fan'));
+  const fanRunning = $derived(app.room.sources.some((s) => s.kind === 'fan' && s.fanEnabled !== false));
   const selectedProbe = $derived(app.selection?.kind === 'probe' ? app.room.probes.find((p) => p.id === app.selection!.id) : undefined);
   const sliceLength = $derived(app.sliceAxis === 'x' ? app.room.widthM : app.sliceAxis === 'y' ? app.room.heightM : app.room.ceilingM);
 
@@ -90,8 +92,10 @@
     return Math.abs(w) >= 1000 ? `${(w / 1000).toFixed(2)} kW` : `${w.toFixed(0)} W`;
   }
 </script>
-{#snippet positionControls(item: { id: number; x: number; y: number; z: number }, kind: 'source' | 'probe')}
-  {#each [{ key: 'x' as const, label: 'X · width', max: app.room.widthM }, { key: 'y' as const, label: 'Y · length', max: app.room.heightM }, { key: 'z' as const, label: 'Z · height above floor', max: app.room.ceilingM }] as axis}
+{#snippet positionControls(item: { id: number; x: number; y: number; z: number }, kind: 'source' | 'probe', ceilingMounted = false)}
+  {#each (ceilingMounted
+    ? [{ key: 'x' as const, label: 'X · width', max: app.room.widthM }, { key: 'y' as const, label: 'Y · length', max: app.room.heightM }]
+    : [{ key: 'x' as const, label: 'X · width', max: app.room.widthM }, { key: 'y' as const, label: 'Y · length', max: app.room.heightM }, { key: 'z' as const, label: 'Z · height above floor', max: app.room.ceilingM }]) as axis}
     <label>
       <span>{axis.label}<output>{item[axis.key].toFixed(1)} m</output></span>
       <input type="range" min="0" max={axis.max} step="0.1" value={item[axis.key]}
@@ -166,37 +170,64 @@
       <button onclick={() => addSource('cold')} disabled={app.room.sources.length >= LIMITS.sources}>
         + Cold
       </button>
+      <button onclick={() => addSource('fan')} disabled={app.room.sources.length >= LIMITS.sources || hasCeilingFan}>
+        + Fan
+      </button>
     </div>
     <ul class="items">
       {#each app.room.sources as s (s.id)}
         <li class:sel={app.selection?.kind === 'source' && app.selection.id === s.id}>
           <button class="item" onclick={() => select({ kind: 'source', id: s.id })}>
             <span class="dot {s.kind}"></span>
-            {s.kind === 'cold' ? 'Cold' : app.room.heatingMode === 'underfloor' ? 'Underfloor' : 'Heat'} {s.id} · {s.powerKW.toFixed(1)} kW
+            {#if s.kind === 'fan'}
+              Ceiling fan {s.id}{#if s.fanEnabled === false} · Off{/if}
+            {:else}
+              {s.kind === 'cold' ? 'Cold' : app.room.heatingMode === 'underfloor' ? 'Underfloor' : 'Heat'} {s.id} · {s.powerKW.toFixed(1)} kW
+            {/if}
           </button>
           <button onclick={() => removeSource(s.id)} aria-label="Remove source {s.id}">×</button>
         </li>
       {/each}
     </ul>
     {#if selectedSource}
-      <label>
-        <span>
-          {selectedSource.kind === 'heat' ? 'Output' : 'Cooling'}
-          <output>{selectedSource.powerKW.toFixed(1)} kW</output>
-        </span>
-        <input
-          type="range"
-          min={LIMITS.power.min}
-          max={LIMITS.power.max}
-          step={LIMITS.power.step}
-          value={selectedSource.powerKW}
-          oninput={(e) => updateSource(selectedSource.id, { powerKW: e.currentTarget.valueAsNumber })}
-        />
-      </label>
-      {@render positionControls(selectedSource, 'source')}
-      <button onclick={() => holdSource(selectedSource.id)}>↗ Estimate power for 20 °C</button>
-      {#if holdMsg}<p class="hint">{holdMsg}</p>{/if}
-      {#if selectedSource.kind === 'heat'}<PhysicsPanel section="emitter" />{/if}
+      {#if selectedSource.kind === 'fan'}
+        <label class="check">
+          <input type="checkbox" checked={selectedSource.fanEnabled !== false}
+            onchange={(e) => updateSource(selectedSource.id, { fanEnabled: e.currentTarget.checked })} />
+          Fan on
+        </label>
+        <label>
+          <span>Fan speed <output>{(selectedSource.fanSpeedMps ?? 1.2).toFixed(1)} m/s</output></span>
+          <input type="range" min="0.3" max="2.5" step="0.1" value={selectedSource.fanSpeedMps ?? 1.2}
+            oninput={(e) => updateSource(selectedSource.id, { fanSpeedMps: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label>
+          <span>Blade diameter <output>{(selectedSource.fanDiameterM ?? 1.2).toFixed(1)} m</output></span>
+          <input type="range" min="0.5" max="2" step="0.1" value={selectedSource.fanDiameterM ?? 1.2}
+            oninput={(e) => updateSource(selectedSource.id, { fanDiameterM: e.currentTarget.valueAsNumber })} />
+        </label>
+        {@render positionControls(selectedSource, 'source', true)}
+        <p class="hint">Drag the fan marker or adjust X and Y to move it. Its mount stays at the ceiling.</p>
+      {:else}
+        <label>
+          <span>
+            {selectedSource.kind === 'heat' ? 'Output' : 'Cooling'}
+            <output>{selectedSource.powerKW.toFixed(1)} kW</output>
+          </span>
+          <input
+            type="range"
+            min={LIMITS.power.min}
+            max={LIMITS.power.max}
+            step={LIMITS.power.step}
+            value={selectedSource.powerKW}
+            oninput={(e) => updateSource(selectedSource.id, { powerKW: e.currentTarget.valueAsNumber })}
+          />
+        </label>
+        {@render positionControls(selectedSource, 'source')}
+        <button onclick={() => holdSource(selectedSource.id)}>↗ Estimate power for 20 °C</button>
+        {#if holdMsg}<p class="hint">{holdMsg}</p>{/if}
+        {#if selectedSource.kind === 'heat'}<PhysicsPanel section="emitter" />{/if}
+      {/if}
     {:else}
       <p class="hint">Select a source to adjust its power and 3D position. Drag it to move; Shift-drag to change height.</p>
     {/if}
@@ -474,14 +505,14 @@
       <input type="checkbox" bind:checked={app.showVectors} />
       Heat-flow arrows
     </label>
-    {#if app.room.convection}
+    {#if app.room.convection || fanRunning}
       <label class="check">
         <input type="checkbox" bind:checked={app.showAirflow} />
         Show airflow trails
       </label>
-      <p class="hint">Warm air rises along Z and circulates through the 3D room. Toggling convection restarts the simulation.</p>
+      {#if app.room.convection}<p class="hint">Warm air rises and circulates through the 3D room. Toggling convection restarts the simulation.</p>{/if}
     {:else}
-      <p class="hint">Heat clouds show the air temperature throughout the room. Enable convection to see rising plumes and airflow trails.</p>
+      <p class="hint">Heat clouds show the air temperature throughout the room. Enable air currents or add a ceiling fan to see airflow trails.</p>
     {/if}
   </fieldset>
 </div>
@@ -613,6 +644,9 @@
   }
   .dot.cold {
     background: #2f8bff;
+  }
+  .dot.fan {
+    background: #9bc8ec;
   }
   .opening {
     display: flex;

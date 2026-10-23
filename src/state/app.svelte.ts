@@ -121,16 +121,18 @@ const SPOTS = [
 
 export function addSource(kind: SourceKind): void {
   if (app.room.sources.length >= LIMITS.sources) return;
+  if (kind === 'fan' && app.room.sources.some((s) => s.kind === 'fan')) return;
   const id = nextId(app.room.sources);
   const [fx, fy] = SPOTS[(id - 1) % SPOTS.length];
   edit((r) => {
     r.sources.push({
       id,
       kind,
-      x: r.widthM * fx,
-      y: r.heightM * fy,
-      z: kind === 'heat' ? 0.4 : Math.max(0.4, r.ceilingM - 0.5),
-      powerKW: kind === 'heat' ? 1.5 : 1,
+      x: kind === 'fan' ? r.widthM / 2 : r.widthM * fx,
+      y: kind === 'fan' ? r.heightM / 2 : r.heightM * fy,
+      z: kind === 'heat' ? 0.4 : kind === 'fan' ? r.ceilingM - 0.12 : Math.max(0.4, r.ceilingM - 0.5),
+      powerKW: kind === 'heat' ? 1.5 : kind === 'cold' ? 1 : 0,
+      ...(kind === 'fan' ? { fanEnabled: true, fanSpeedMps: 1.2, fanDiameterM: 1.2 } : {}),
       ...(kind === 'heat' ? { emitter: emitterPreset('radiator') } : {}),
     });
   });
@@ -214,7 +216,7 @@ export function addFurniture(kind: FurnitureKind): void {
         const occupied = r.furniture.some((f) => {
           const [w, d] = furnitureExtent(f);
           return Math.abs(cx - f.x) < (widthM + w) / 2 + 0.1 && Math.abs(cy - f.y) < (depthM + d) / 2 + 0.1;
-        }) || r.sources.some((s) => s.z < preset.heightM && Math.abs(cx - s.x) < widthM / 2 + 0.3 && Math.abs(cy - s.y) < depthM / 2 + 0.3);
+        }) || r.sources.some((s) => s.kind !== 'fan' && s.z < preset.heightM && Math.abs(cx - s.x) < widthM / 2 + 0.3 && Math.abs(cy - s.y) < depthM / 2 + 0.3);
         if (!occupied) { x = cx; y = cy; found = true; break; }
       }
       if (found) break;
@@ -252,7 +254,10 @@ export function moveItem(kind: 'source' | 'probe' | 'furniture', id: number, x: 
   if (kind === 'furniture') { updateFurniture(id, { x, y }); return; }
   edit((r) => {
     const item = (kind === 'source' ? r.sources : r.probes).find((i) => i.id === id);
-    if (item) Object.assign(item, { x, y, ...(z === undefined ? {} : { z }) });
+    if (item) Object.assign(item, {
+      x, y,
+      ...(z === undefined ? {} : { z: kind === 'source' && 'kind' in item && item.kind === 'fan' ? r.ceilingM - 0.12 : z }),
+    });
   });
   if (kind === 'probe') {
     recorder.clearSeries(`p${id}`);

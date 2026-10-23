@@ -5,6 +5,7 @@ export interface BoundaryFlow { axis: 0 | 1 | 2; index: number; velocity: number
 export interface FlowResult { converged: boolean; residual: number; maxDivergence: number; iterations: number }
 const NU = 1.5e-5, CS = 0.12;
 interface FaceEdge { a: number; b: number; axis: 0 | 1 | 2; face: number; area: number; distance: number }
+interface FanActuator { x: number; y: number; speedMps: number; diameterM: number }
 
 /** Staggered finite-volume Boussinesq airflow. Pressure is a volume-conserving graph
  * projection on connected cut-cell groups, with one pressure gauge per air pocket.
@@ -83,7 +84,7 @@ export class FlowSolver {
   }
 
   /** CFL <= .5 in all three directions, including cut-cell group outflow. */
-  stableDt(maximum = 2, temperature?: ArrayLike<number>): number {
+  stableDt(maximum = 2, temperature?: ArrayLike<number>, fan?: FanActuator): number {
     const g = this.grid, outflow = new Float64Array(this.volumes.length), accelerationOutflow = new Float64Array(this.volumes.length);
     let rate = 0, acceleration = 0;
     let mean = 20, volume = 0, offset = 0;
@@ -103,6 +104,7 @@ export class FlowSolver {
     for (let axis = 0; axis < 3; axis++) {
       let maximumSpeed = 0;
       for (const q of this.arrays[axis]) maximumSpeed = Math.max(maximumSpeed, Math.abs(q));
+      if (axis === 2 && fan) maximumSpeed = Math.max(maximumSpeed, fan.speedMps);
       rate += maximumSpeed / [g.dx, g.dy, g.dz][axis];
     }
     for (const e of this.edges) {
@@ -133,7 +135,7 @@ export class FlowSolver {
     return Math.min(maximum, dt);
   }
 
-  step(temperature: ArrayLike<number>, dt: number, boundary: BoundaryFlow[] = [], buoyancy = true): FlowResult {
+  step(temperature: ArrayLike<number>, dt: number, boundary: BoundaryFlow[] = [], buoyancy = true, fan?: FanActuator): FlowResult {
     if (!(dt > 0) || !Number.isFinite(dt)) return { converged: false, residual: Infinity, maxDivergence: Infinity, iterations: 0 };
     this.enforceBoundaries(boundary);
     this.updateMixing();
@@ -147,6 +149,25 @@ export class FlowSolver {
     if (buoyancy) for (let k = 1; k < g.nz; k++) for (let j = 0; j < g.ny; j++) for (let i = 0; i < g.nx; i++) {
       const face = g.wIndex(i, j, k), a = g.index(i, j, k - 1), b = g.index(i, j, k);
       if (g.openW[face] > 0 && g.volume[a] > 0 && g.volume[b] > 0) this.w[face] += dt * betaG * ((temperature[a] + temperature[b]) / 2 - mean);
+    }
+    if (fan) {
+      const centerX = fan.x, centerY = fan.y;
+      const radius = fan.diameterM / 2, radius2 = radius * radius;
+      const jetDepth = Math.min(1, g.room.ceilingM * 0.45), response = 2.2;
+      for (let k = 1; k < g.nz; k++) {
+        const z = k * g.dz, belowFan = g.room.ceilingM - z;
+        if (belowFan < 0 || belowFan > jetDepth) continue;
+        const vertical = 1 - belowFan / jetDepth;
+        for (let j = 0; j < g.ny; j++) for (let i = 0; i < g.nx; i++) {
+          const x = (i + 0.5) * g.dx, y = (j + 0.5) * g.dy;
+          const r2 = (x - centerX) ** 2 + (y - centerY) ** 2;
+          const face = g.wIndex(i, j, k);
+          if (r2 >= radius2 || !g.openW[face]) continue;
+          const radial = Math.sqrt(1 - r2 / radius2);
+          const target = -fan.speedMps * radial * vertical;
+          this.w[face] += dt * response * (target - this.w[face]);
+        }
+      }
     }
     this.enforceBoundaries(boundary);
     return this.project(dt, boundary);

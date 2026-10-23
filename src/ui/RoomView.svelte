@@ -10,7 +10,7 @@
   import type { SimulationField } from '../sim/field';
   import { getEmitter } from '../sim/model';
   import type { Opening } from '../sim/config';
-  import { FURNITURE_PRESETS, ROOF_MATERIALS, roofGeometry } from '../sim/config';
+  import { DEFAULT_CEILING_FAN, FURNITURE_PRESETS, ROOF_MATERIALS, roofGeometry } from '../sim/config';
   import { furnitureBoxes, intersectBox } from '../sim/furniture';
   import { app, moveItem, recorder, select, updateFurniture, updateOpening } from '../state/app.svelte';
 
@@ -31,10 +31,11 @@
   let orbit: { px: number; py: number } | null = null;
   let hoverRaw: { px: number; py: number } | null = null;
   let hover = $state<{ px: number; py: number; temp: number; z: number } | null>(null);
-  let markers = $state<{ kind: 'source' | 'probe'; id: number; px: number; py: number; x: number; y: number; z: number; cold: boolean }[]>([]);
+  let markers = $state<{ kind: 'source' | 'probe'; id: number; px: number; py: number; x: number; y: number; z: number; cold: boolean; fan: boolean }[]>([]);
   let openingMarkers = $state<{ id: number; px: number; py: number; kind: string; open: boolean }[]>([]);
   let furnitureMarkers = $state<{ id: number; label: string; px: number; py: number }[]>([]);
   const boxes = $derived(app.room.furniture.flatMap(furnitureBoxes));
+  const hasActiveCeilingFan = $derived(app.room.sources.some((source) => source.kind === 'fan' && source.fanEnabled !== false));
   const airflow = new AirflowTrails();
   const temperatureDisplay = new TemperatureDisplay();
   let airflowSim: SimulationField | undefined;
@@ -160,7 +161,8 @@
       orbit = p; return;
     }
     if (drag && transform) {
-      if (e.shiftKey && drag.kind !== 'furniture') moveItem(drag.kind, drag.id, drag.x, drag.y, drag.z - (p.py - drag.py) / transform.scale);
+      const isFan = drag.kind === 'source' && app.room.sources.find((source) => source.id === drag!.id)?.kind === 'fan';
+      if (e.shiftKey && drag.kind !== 'furniture' && !isFan) moveItem(drag.kind, drag.id, drag.x, drag.y, drag.z - (p.py - drag.py) / transform.scale);
       else {
         const from = pointOnPlane(transform, drag.px, drag.py, 2, drag.z);
         const to = pointOnPlane(transform, p.px, p.py, 2, drag.z);
@@ -184,6 +186,7 @@
     const directions: Record<string, Vec3> = { ArrowLeft: [-step, 0, 0], ArrowRight: [step, 0, 0], ArrowUp: [0, -step, 0], ArrowDown: [0, step, 0], PageUp: [0, 0, step], PageDown: [0, 0, -step] };
     const d = directions[e.key];
     if (!d) return;
+    if (m.fan && d[2] !== 0) { e.preventDefault(); return; }
     e.preventDefault(); moveItem(m.kind, m.id, m.x + d[0], m.y + d[1], m.z + d[2]);
   }
   function onFurnitureKey(e: KeyboardEvent, id: number) {
@@ -258,7 +261,7 @@
       polygon([[right, -t-o, low], [w/2, -t-o, h+rise], [w/2, l+t+o, h+rise], [right, l+t+o, low]], color + '55', color);
     }
     if(app.room.heatingMode !== 'underfloor') for(const source of app.room.sources) {
-      const emitter=getEmitter(source); if(emitter.kind==='ideal' || source.kind==='cold') continue;
+      const emitter=getEmitter(source); if(emitter.kind==='ideal' || source.kind==='cold' || source.kind==='fan') continue;
       const size=[emitter.widthM,emitter.depthM,emitter.heightM], center=[source.x,source.y,source.z];
       const min=center.map((n,a)=>Math.max(0,n-size[a]/2)), max=center.map((n,a)=>Math.min([w,l,h][a],n+size[a]/2));
       for(let axis=0;axis<3;axis++) for(const sign of [0,1]) {
@@ -269,6 +272,25 @@
     }
     if (app.room.heatingMode === 'underfloor' && app.room.sources.some((s) => s.kind === 'heat' && s.powerKW > 0)) {
       polygon([[0,0,0], [w,0,0], [w,l,0], [0,l,0]], app.stats.thermostatHeating ? '#ff914233' : '#ff914210', '#ff914288');
+    }
+    const fan = app.room.sources.find((source) => source.kind === 'fan');
+    if (fan) {
+      const cx = fan.x, cy = fan.y, z = fan.z;
+      const radius = (fan.fanDiameterM ?? DEFAULT_CEILING_FAN.diameterM) / 2, bladeWidth = Math.min(0.13, radius * 0.22);
+      const spin = fan.fanEnabled === false ? 0 : sim.elapsed * (fan.fanSpeedMps ?? DEFAULT_CEILING_FAN.speedMps) * 2.2;
+      line([cx, cy, h], [cx, cy, z], '#d5e0ecbb', 2);
+      for (let blade = 0; blade < 4; blade++) {
+        const angle = spin + blade * Math.PI / 2, ux = Math.cos(angle), uy = Math.sin(angle);
+        const px = -uy * bladeWidth / 2, py = ux * bladeWidth / 2;
+        polygon([
+          [cx + ux * 0.09 + px, cy + uy * 0.09 + py, z],
+          [cx + ux * radius + px, cy + uy * radius + py, z],
+          [cx + ux * radius - px, cy + uy * radius - py, z],
+          [cx + ux * 0.09 - px, cy + uy * 0.09 - py, z],
+        ], '#d5e0ec88', '#edf4ffcc');
+      }
+      const motor = 0.09;
+      polygon([[cx-motor,cy-motor,z-0.04],[cx+motor,cy-motor,z-0.04],[cx+motor,cy+motor,z-0.04],[cx-motor,cy+motor,z-0.04]], '#d5e0ec', '#ffffff');
     }
     if (app.showVectors) for (const vector of sim.vectorField()) {
       const length = Math.min(w, l, h) * 0.16 / vector.magnitude;
@@ -305,10 +327,11 @@
       for (let i = 0; i < 4; i++) line(corners[i], corners[(i + 1) % 4], '#ffc98c', 1.5);
     }
     for (const item of [...app.room.sources, ...app.room.probes]) {
+      if ('kind' in item && item.kind === 'fan') continue;
       ctx.setLineDash([3, 4]); line([item.x, item.y, 0], [item.x, item.y, item.z], '#f1f5f960'); ctx.setLineDash([]);
       const p = project(v, [item.x, item.y, 0]); ctx.strokeStyle = '#d8e2f080'; ctx.beginPath(); ctx.ellipse(p.x, p.y, 5, 2.5, 0, 0, Math.PI * 2); ctx.stroke();
     }
-    if (app.view === 'volume' && app.room.convection && app.showAirflow) {
+    if (app.view === 'volume' && (app.room.convection || (fan !== undefined && fan.fanEnabled !== false)) && app.showAirflow) {
       const seeds: Vec3[] = [];
       for (let z = 0; z < 3; z++) for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) {
         seeds.push([w * (0.1 + x * 0.2), l * (0.1 + y * 0.8 / 3), h * (0.15 + z * 0.35)]);
@@ -319,7 +342,7 @@
         seeds.push([source.x + Math.cos(angle) * 0.18, source.y + Math.sin(angle) * 0.18,
           Math.max(0.05, Math.min(h - 0.05, source.z + (source.kind === 'heat' ? 0.18 : -0.18)))]);
       }
-      const seedsKey = JSON.stringify(seeds);
+      const seedsKey = JSON.stringify([seeds, fan]);
       if (airflowSim !== sim || airflowSeedsKey !== seedsKey) {
         airflow.reset(); airflowSim = sim; airflowSeedsKey = seedsKey;
       }
@@ -399,8 +422,8 @@
         furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
       drawOverlay(transform, dispMin, dispMax, wallDt);
       markers = cameraMode === 'walk' ? [] : [
-        ...app.room.sources.map((p) => ({ ...p, kind: 'source' as const, cold: p.kind === 'cold' })),
-        ...app.room.probes.map((p) => ({ ...p, kind: 'probe' as const, cold: false })),
+        ...app.room.sources.map((p) => ({ ...p, kind: 'source' as const, cold: p.kind === 'cold', fan: p.kind === 'fan' })),
+        ...app.room.probes.map((p) => ({ ...p, kind: 'probe' as const, cold: false, fan: false })),
       ].map((p) => { const q = project(transform!, [p.x, p.y, p.z]); return { ...p, px: q.x, py: q.y }; });
       openingMarkers = cameraMode === 'walk' ? [] : app.room.openings.map((o) => {
         const corners = openingPoints(o); const mid = corners[0].map((n, i) => (n + corners[2][i]) / 2) as Vec3;
@@ -441,7 +464,7 @@
   <div class="heading">
     <span class="eyebrow">HEATFLOW / SPATIAL SIMULATION</span>
     <h2>{cameraMode === 'walk' ? 'Walk through the room' : 'Room overview'}</h2>
-    <p>{app.room.widthM.toFixed(1)} × {app.room.heightM.toFixed(1)} × {app.room.ceilingM.toFixed(1)} m <span>·</span> {app.room.convection ? 'Buoyant airflow' : 'Thermal diffusion'}</p>
+    <p>{app.room.widthM.toFixed(1)} × {app.room.heightM.toFixed(1)} × {app.room.ceilingM.toFixed(1)} m <span>·</span>{app.room.convection ? hasActiveCeilingFan ? 'Buoyant airflow + ceiling fan' : 'Buoyant airflow' : hasActiveCeilingFan ? 'Ceiling fan circulation' : 'Thermal diffusion'}</p>
   </div>
   <div class="view-tools" aria-label="3D view controls">
     <button aria-pressed={cameraMode === 'orbit'} class:active={cameraMode === 'orbit'} onclick={() => setCameraMode('orbit')}>Orbit</button>
@@ -455,7 +478,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="room" bind:this={roomEl} role="application" tabindex="0" aria-label={cameraMode === 'walk'
     ? 'First-person room view. Use W A S D or arrow keys to walk, hold Shift to move faster, and drag to look around. Press Escape to return to orbit view.'
-    : '3D room. Drag empty space to rotate; scroll to zoom. Drag furniture or sources to move; Shift-drag sources to change height. Arrow keys move selected markers, Page Up and Page Down change source height; R rotates furniture.'}
+    : '3D room. Drag empty space to rotate; scroll to zoom. Drag furniture or sources to move; Shift-drag heat and cold sources to change height. The ceiling fan moves horizontally. Arrow keys move selected markers; R rotates furniture.'}
     onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}
     onpointerleave={() => { hoverRaw = null; hover = null; }} oncontextmenu={(e) => e.preventDefault()}
     onwheel={(e) => { e.preventDefault(); zoom(Math.exp(-e.deltaY * 0.001)); }}>
@@ -475,12 +498,12 @@
       </button>
     {/each}
     {#each markers as m (`${m.kind}${m.id}`)}
-      <button class="marker" class:probe={m.kind === 'probe'} class:cold={m.cold}
+      <button class="marker" class:probe={m.kind === 'probe'} class:cold={m.cold} class:fan={m.fan}
         class:sel={app.selection?.kind === m.kind && app.selection.id === m.id}
         style:left="{m.px}px" style:top="{m.py}px"
-        aria-label="{m.kind === 'probe' ? 'Probe' : m.cold ? 'Cold source' : 'Heat source'} {m.id}. X {m.x.toFixed(1)}, Y {m.y.toFixed(1)}, height {m.z.toFixed(1)} metres."
+        aria-label="{m.kind === 'probe' ? 'Probe' : m.fan ? 'Ceiling fan' : m.cold ? 'Cold source' : 'Heat source'} {m.id}. X {m.x.toFixed(1)}, Y {m.y.toFixed(1)}, height {m.z.toFixed(1)} metres."
         onpointerdown={(e) => startDrag(e, m.kind, m.id)} onkeydown={(e) => onKey(e, m)} onfocus={() => select({ kind: m.kind, id: m.id })} onclick={() => select({ kind: m.kind, id: m.id })}>
-        {m.kind === 'probe' ? m.id : m.cold ? '−' : '+'}
+        {m.kind === 'probe' ? m.id : m.fan ? 'F' : m.cold ? '−' : '+'}
       </button>
     {/each}
     {#if hover}
@@ -489,7 +512,7 @@
   </div>
   <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')}></div><div class="scale-values"><span>{Math.round(app.stats.tMin)}</span><span>{Math.round((app.stats.tMax + app.stats.tMin) / 2)}</span><span>{Math.round(app.stats.tMax)}</span></div></div>
   <div class="view-caption"><span class="live" class:paused={!app.running}></span>{cameraMode === 'walk' ? 'First-person room view' : app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
-  <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag sources to lift'}</p>
+  <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag heat or cold sources to lift · Move fan horizontally'}</p>
 </div>
 
 <style>
@@ -508,6 +531,7 @@
   .view-tools button:hover { background: #303d51; color: #fff; }
   .marker { position: absolute; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff0d7; background: #ff7432; color: white; box-shadow: 0 0 25px #ff6e3260, 0 2px 7px #0008; cursor: grab; touch-action: none; font: 600 18px system-ui; display: grid; place-items: center; padding: 0; }
   .marker.cold { background: #3c95f4; border-color: #e4f2ff; box-shadow: 0 0 25px #449bff70; }
+  .marker.fan { background: #526b83; border-color: #e4f2ff; box-shadow: 0 0 25px #a8d4ff70; }
   .marker.probe { width: 24px; height: 24px; border-radius: 6px; background: #151c2cee; border-color: #e4e9ff; font-size: 12px; box-shadow: 0 2px 8px #0008; }
   .marker.sel { outline: 2px solid #fff9; outline-offset: 4px; }
   .furniture-marker { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 22px; border-radius: 5px; border: 1px solid #e5c4a099; background: #251f1bdd; color: #f5d3ad; cursor: grab; padding: 0; touch-action: none; }
