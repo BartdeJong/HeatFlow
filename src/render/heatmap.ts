@@ -10,6 +10,7 @@ export interface RenderView {
   mode: 'volume' | 'slice';
   axis: 'x' | 'y' | 'z';
   fraction: number;
+  walkMode?: boolean;
   temperatures?: { min: number; max: number; mean: number };
   temperatureField?: { T: Float32Array; sample(x: number, y: number, z: number): number };
   furniture?: Furniture[];
@@ -35,7 +36,7 @@ uniform vec3 uSize, uOrigin, uNormal, uRight, uUp;
 uniform vec2 uResolution;
 uniform float uScale, uFraction;
 uniform vec3 uThermal;
-uniform int uMode, uAxis;
+uniform int uMode, uAxis, uPerspective, uWalkMode;
 uniform int uBoxCount;
 uniform vec4 uBoxMin[72], uBoxMax[72];
 uniform vec3 uFurnitureColor[8];
@@ -44,8 +45,8 @@ out vec4 outColor;
 vec3 color(float t) { return texture(uPalette, vec2(clamp(t, 0.002, 0.998), 0.5)).rgb; }
 void main() {
   vec2 pixel = (gl_FragCoord.xy - uResolution * 0.5) / uScale;
-  vec3 ro = uOrigin + uRight * pixel.x + uUp * pixel.y;
-  vec3 rd = -uNormal;
+  vec3 ro = uPerspective == 1 ? uOrigin : uOrigin + uRight * pixel.x + uUp * pixel.y;
+  vec3 rd = uPerspective == 1 ? normalize(-uNormal + uRight * pixel.x + uUp * pixel.y) : -uNormal;
   vec3 safeDir = vec3(rd.x == 0.0 ? 0.000001 : rd.x, rd.y == 0.0 ? 0.000001 : rd.y, rd.z == 0.0 ? 0.000001 : rd.z);
   vec3 a = -ro / safeDir, b = (uSize - ro) / safeDir;
   vec3 lo = min(a,b), hi = max(a,b);
@@ -107,7 +108,7 @@ void main() {
   }
   float rear = texture(uTemp, (ro + rd * (exit - 0.001)) / uSize).r;
   bool hitFurniture = objectT <= roomExit;
-  float rearAlpha = hitFurniture ? 1.0 : 0.06;
+  float rearAlpha = (hitFurniture || uWalkMode == 1) ? 1.0 : 0.06;
   sum += (1.0 - opacity) * (hitFurniture ? objectColor : color(rear)) * rearAlpha;
   opacity += (1.0 - opacity) * rearAlpha;
   outColor = vec4(sum / max(opacity, 0.001), opacity);
@@ -217,6 +218,8 @@ function createWebGLRenderer(canvas: HTMLCanvasElement, palette: PaletteId): Hea
       gl.uniform3fv(uniform('uRight'), v.right); gl.uniform3fv(uniform('uUp'), v.up);
       gl.uniform2f(uniform('uResolution'), canvas.width, canvas.height);
       gl.uniform1f(uniform('uScale'), v.scale * dpr);
+      gl.uniform1i(uniform('uPerspective'), v.perspective ? 1 : 0);
+      gl.uniform1i(uniform('uWalkMode'), view.walkMode ? 1 : 0);
       gl.uniform1f(uniform('uFraction'), view.fraction);
       const { min, max, mean } = view.temperatures ?? sim.stats();
       gl.uniform3f(uniform('uThermal'), (mean - tMin) / span, Math.max(0.5, max - mean) / span, Math.max(0.5, mean - min) / span);
@@ -247,6 +250,29 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
       const n = 22;
       const { min, max, mean } = view.temperatures ?? sim.stats();
       const surfaces: { points: Vec3[]; color: string; depth: number; edge?: string }[] = [];
+      const depthOf = (point: Vec3) => view.transform.perspective
+        ? -dot(point.map((n, i) => n - view.transform.origin[i]) as Vec3, view.transform.normal)
+        : dot(point, view.transform.normal);
+      if (view.walkMode) {
+        // The fallback renderer has no ray marcher, so build a lightly tessellated
+        // thermal shell to make the room boundaries visible from the inside.
+        const divisions = 12;
+        const faces: ((a: number, b: number) => Vec3)[] = [
+          (a, b) => [a / divisions * view.size[0], b / divisions * view.size[1], 0],
+          (a, b) => [a / divisions * view.size[0], b / divisions * view.size[1], view.size[2]],
+          (a, b) => [a / divisions * view.size[0], 0, b / divisions * view.size[2]],
+          (a, b) => [a / divisions * view.size[0], view.size[1], b / divisions * view.size[2]],
+          (a, b) => [0, a / divisions * view.size[1], b / divisions * view.size[2]],
+          (a, b) => [view.size[0], a / divisions * view.size[1], b / divisions * view.size[2]],
+        ];
+        for (const face of faces) for (let y = 0; y < divisions; y++) for (let x = 0; x < divisions; x++) {
+          const p = face(x + 0.5, y + 0.5);
+          const rgb = paletteColor(palette, ((view.temperatureField ?? sim).sample(...p) - tMin) / (tMax - tMin || 1));
+          const points = [face(x, y), face(x + 1, y), face(x + 1, y + 1), face(x, y + 1)];
+          const center = points[0].map((n, i) => (n + points[2][i]) / 2) as Vec3;
+          surfaces.push({ points, color: `rgba(${rgb.join(',')},0.92)`, depth: depthOf(center) });
+        }
+      }
       for (const level of levels) for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
         const point = (a: number, b: number): Vec3 => {
           const p: Vec3 = [0, 0, 0]; p[axis] = level * view.size[axis];
@@ -259,7 +285,7 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
         const contrast = Math.abs(temp - mean) / Math.max(0.5, temp >= mean ? max - mean : mean - min);
         const alpha = view.mode === 'slice' ? 0.96 : Math.min(0.65, Math.max(0, contrast - 0.04) ** 1.5 * 0.8);
         if (alpha < 0.005) continue;
-        surfaces.push({ color: `rgba(${rgb.join(',')},${alpha})`, depth: dot(p, view.transform.normal),
+        surfaces.push({ color: `rgba(${rgb.join(',')},${alpha})`, depth: depthOf(p),
           points: [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(([a, b]) => point(a, b)) });
       }
       for (const f of view.furniture ?? []) for (const box of furnitureBoxes(f)) for (let axis = 0; axis < 3; axis++) {
@@ -272,10 +298,10 @@ function createCanvasRenderer(canvas: HTMLCanvasElement, palette: PaletteId): He
         });
         const center = points[0].map((value, i) => (value + points[2][i]) / 2) as Vec3;
         const rgb = furnitureColor(f).map((c) => c * 255 * partTone(box.part) * (axis === 2 ? 1 : axis === 0 ? 0.65 : 0.8));
-        surfaces.push({ points, color: `rgb(${rgb.join(',')})`, depth: dot(center, view.transform.normal),
+        surfaces.push({ points, color: `rgb(${rgb.join(',')})`, depth: depthOf(center),
           edge: f.id === view.selectedFurnitureId ? '#efbe83' : '#18202d55' });
       }
-      surfaces.sort((a, b) => a.depth - b.depth);
+      surfaces.sort((a, b) => view.transform.perspective ? b.depth - a.depth : a.depth - b.depth);
       for (const surface of surfaces) {
         ctx.beginPath();
         for (const point of surface.points) { const q = project(view.transform, point); ctx.lineTo(q.x, q.y); }

@@ -2,7 +2,7 @@
   import { paletteCssGradient } from '../render/palette';
   import { onMount, untrack } from 'svelte';
   import { createRenderer, fitCanvas, type HeatmapRenderer } from '../render/heatmap';
-  import { defaultCamera, pointOnPlane, project, screenRay, viewTransform, type Vec3, type ViewTransform } from '../render/camera';
+  import { defaultCamera, dot, pointOnPlane, project, screenRay, viewTransform, walkTransform, type Camera, type Vec3, type ViewTransform } from '../render/camera';
   import { AirflowTrails, airflowHighlight } from '../render/airflow';
   import { TemperatureDisplay } from '../render/temperature';
   import { paletteColor } from '../render/palette';
@@ -21,6 +21,11 @@
   const client = new SimulationClient();
   const sim = client.field;
   let camera = defaultCamera();
+  let walkCamera: Camera = { yaw: -Math.PI / 2, pitch: 0, zoom: 1 };
+  let walkPosition: Vec3 = [0, 0, 1.6];
+  let cameraMode = $state<'orbit' | 'walk'>('orbit');
+  const walkKeys = new Set<string>();
+  const handleWalkBlur = () => walkKeys.clear();
   let transform: ViewTransform | undefined;
   let drag: { kind: 'source' | 'probe' | 'furniture'; id: number; x: number; y: number; z: number; px: number; py: number } | null = null;
   let orbit: { px: number; py: number } | null = null;
@@ -48,7 +53,10 @@
     untrack(() => { client.reset(); airflow.reset(); temperatureDisplay.reset(); recorder.clear(); app.graphTick++; });
   });
   $effect(() => { renderer?.setPalette(app.palette); });
-  $effect(() => { app.cameraToken; untrack(() => { camera = defaultCamera(); }); });
+  $effect(() => { app.cameraToken; untrack(() => {
+    camera = defaultCamera(); walkCamera = { yaw: -Math.PI / 2, pitch: 0, zoom: 1 };
+    walkPosition = findWalkerSpawn();
+  }); });
   $effect(() => {
     const keep = new Set(['avg', ...app.room.probes.map((p) => `p${p.id}`)]);
     untrack(() => recorder.removeSeriesExcept(keep));
@@ -57,6 +65,63 @@
   function localPoint(e: PointerEvent) {
     const rect = roomEl.getBoundingClientRect();
     return { px: e.clientX - rect.left, py: e.clientY - rect.top };
+  }
+  const walkerRadius = 0.18, walkerHeight = 1.7;
+  function canWalkerOccupy(x: number, y: number) {
+    if (x < walkerRadius || y < walkerRadius || x > app.room.widthM - walkerRadius || y > app.room.heightM - walkerRadius) return false;
+    return !boxes.some((box) => box.min[2] < walkerHeight && box.max[2] > 0.12
+      && x + walkerRadius > box.min[0] && x - walkerRadius < box.max[0]
+      && y + walkerRadius > box.min[1] && y - walkerRadius < box.max[1]);
+  }
+  function findWalkerSpawn(): Vec3 {
+    const candidates: { x: number; y: number; distance: number }[] = [];
+    for (let y = walkerRadius + 0.1; y <= app.room.heightM - walkerRadius; y += 0.25) {
+      for (let x = walkerRadius + 0.1; x <= app.room.widthM - walkerRadius; x += 0.25) {
+        const distance = (x - app.room.widthM / 2) ** 2 + (y - app.room.heightM / 2) ** 2;
+        if (canWalkerOccupy(x, y)) candidates.push({ x, y, distance });
+      }
+    }
+    candidates.sort((a, b) => a.distance - b.distance);
+    const spawn = candidates[0];
+    return [spawn?.x ?? app.room.widthM / 2, spawn?.y ?? app.room.heightM / 2, Math.min(walkerHeight - 0.05, app.room.ceilingM - 0.15)];
+  }
+  function setCameraMode(mode: 'orbit' | 'walk') {
+    cameraMode = mode;
+    walkKeys.clear();
+    if (mode === 'walk') {
+      walkPosition = findWalkerSpawn();
+      walkCamera = { yaw: -Math.PI / 2, pitch: 0, zoom: 1 };
+      requestAnimationFrame(() => roomEl?.focus());
+    }
+  }
+  function handleWalkKeyDown(e: KeyboardEvent) {
+    if (cameraMode !== 'walk' || e.metaKey || e.ctrlKey || e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.matches('input, textarea, select, button, [contenteditable="true"]')) return;
+    const key = e.key.toLowerCase();
+    if (key === 'escape') { setCameraMode('orbit'); return; }
+    if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'].includes(key)) {
+      e.preventDefault(); walkKeys.add(key);
+    }
+  }
+  function handleWalkKeyUp(e: KeyboardEvent) { walkKeys.delete(e.key.toLowerCase()); }
+  function updateWalker(dt: number) {
+    walkPosition[2] = Math.min(walkerHeight - 0.05, app.room.ceilingM - 0.15);
+    if (!canWalkerOccupy(walkPosition[0], walkPosition[1])) walkPosition = findWalkerSpawn();
+    const forward = [-Math.cos(walkCamera.yaw), -Math.sin(walkCamera.yaw)];
+    const right = [Math.sin(walkCamera.yaw), -Math.cos(walkCamera.yaw)];
+    let dx = 0, dy = 0;
+    if (walkKeys.has('w') || walkKeys.has('arrowup')) { dx += forward[0]; dy += forward[1]; }
+    if (walkKeys.has('s') || walkKeys.has('arrowdown')) { dx -= forward[0]; dy -= forward[1]; }
+    if (walkKeys.has('d') || walkKeys.has('arrowright')) { dx += right[0]; dy += right[1]; }
+    if (walkKeys.has('a') || walkKeys.has('arrowleft')) { dx -= right[0]; dy -= right[1]; }
+    const length = Math.hypot(dx, dy);
+    if (!length) return;
+    const speed = walkKeys.has('shift') ? 3.8 : 2.2;
+    dx = dx / length * speed * dt; dy = dy / length * speed * dt;
+    // Resolve each axis independently so the player slides along walls and furniture.
+    if (canWalkerOccupy(walkPosition[0] + dx, walkPosition[1])) walkPosition[0] += dx;
+    if (canWalkerOccupy(walkPosition[0], walkPosition[1] + dy)) walkPosition[1] += dy;
   }
   function startDrag(e: PointerEvent, kind: 'source' | 'probe' | 'furniture', id: number) {
     if (e.button !== 0) return;
@@ -70,7 +135,7 @@
   }
   function onPointerDown(e: PointerEvent) {
     if (e.button !== 0 && e.button !== 2) return;
-    if (e.button === 0 && transform) {
+    if (cameraMode === 'orbit' && e.button === 0 && transform) {
       const { px, py } = localPoint(e), ray = screenRay(transform, px, py);
       let closest = Infinity, id: number | undefined;
       for (const box of boxes) {
@@ -85,8 +150,13 @@
   function onPointerMove(e: PointerEvent) {
     const p = localPoint(e);
     if (orbit) {
-      camera.yaw += (p.px - orbit.px) * 0.008;
-      camera.pitch = Math.max(0.12, Math.min(1.45, camera.pitch + (p.py - orbit.py) * 0.008));
+      if (cameraMode === 'walk') {
+        walkCamera.yaw += (p.px - orbit.px) * 0.008;
+        walkCamera.pitch = Math.max(-1.2, Math.min(1.2, walkCamera.pitch + (p.py - orbit.py) * 0.008));
+      } else {
+        camera.yaw += (p.px - orbit.px) * 0.008;
+        camera.pitch = Math.max(0.12, Math.min(1.45, camera.pitch + (p.py - orbit.py) * 0.008));
+      }
       orbit = p; return;
     }
     if (drag && transform) {
@@ -105,7 +175,10 @@
     if (roomEl.hasPointerCapture(e.pointerId)) roomEl.releasePointerCapture(e.pointerId);
     if (e.pointerType !== 'mouse') { hoverRaw = null; hover = null; }
   }
-  function zoom(factor: number) { camera.zoom = Math.max(0.55, Math.min(2.4, camera.zoom * factor)); }
+  function zoom(factor: number) {
+    if (cameraMode === 'walk') walkCamera.zoom = Math.max(0.65, Math.min(1.8, walkCamera.zoom * factor));
+    else camera.zoom = Math.max(0.55, Math.min(2.4, camera.zoom * factor));
+  }
   function onKey(e: KeyboardEvent, m: typeof markers[number]) {
     const step = e.shiftKey ? 0.5 : 0.1;
     const directions: Record<string, Vec3> = { ArrowLeft: [-step, 0, 0], ArrowRight: [step, 0, 0], ArrowUp: [0, -step, 0], ArrowDown: [0, step, 0], PageUp: [0, 0, step], PageDown: [0, 0, -step] };
@@ -138,14 +211,39 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, v.width, v.height);
     const { widthM: w, heightM: l, ceilingM: h } = app.room;
     const line = (a: Vec3, b: Vec3, color: string, width = 1) => {
-      const p = project(v, a), q = project(v, b);
+      let start = a, end = b;
+      if (cameraMode === 'walk') {
+        const depth = (p: Vec3) => -dot(p.map((n, i) => n - v.origin[i]) as Vec3, v.normal);
+        const da = depth(start), db = depth(end);
+        if (da <= 0.05 && db <= 0.05) return;
+        if (da <= 0.05 || db <= 0.05) {
+          const t = (0.05 - da) / (db - da);
+          const clipped = start.map((n, i) => n + (end[i] - n) * t) as Vec3;
+          if (da <= 0.05) start = clipped; else end = clipped;
+        }
+      }
+      const p = project(v, start), q = project(v, end);
       ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
     };
     const polygon = (points: Vec3[], fill: string, stroke: string) => {
-      ctx.beginPath(); points.map((p) => project(v, p)).forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath();
+      let visible = points;
+      if (cameraMode === 'walk') {
+        const depth = (p: Vec3) => -dot(p.map((n, i) => n - v.origin[i]) as Vec3, v.normal);
+        visible = [];
+        for (let i = 0; i < points.length; i++) {
+          const a = points[i], b = points[(i + 1) % points.length], da = depth(a), db = depth(b);
+          if (da >= 0.05) visible.push(a);
+          if ((da < 0.05 && db >= 0.05) || (da >= 0.05 && db < 0.05)) {
+            const t = (0.05 - da) / (db - da);
+            visible.push(a.map((n, axis) => n + (b[axis] - n) * t) as Vec3);
+          }
+        }
+        if (visible.length < 3) return;
+      }
+      ctx.beginPath(); visible.map((p) => project(v, p)).forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath();
       ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke();
     };
-    if (app.exterior) {
+    if (app.exterior && cameraMode !== 'walk') {
       const { rise, overhangM: o } = roofGeometry(app.room);
       const t = app.room.wall.thicknessM + app.room.wall.insulationM;
       const color = ROOF_MATERIALS.find((m) => m.id === app.room.roof.material)!.color;
@@ -181,8 +279,10 @@
       for (const turn of [-0.5, 0.5]) { ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - 5 * Math.cos(angle + turn), b.y - 5 * Math.sin(angle + turn)); }
       ctx.stroke();
     }
-    for (let x = 0; x <= w; x++) line([x, 0, 0], [x, l, 0], '#ffffff14');
-    for (let y = 0; y <= l; y++) line([0, y, 0], [w, y, 0], '#ffffff14');
+    if (cameraMode !== 'walk') {
+      for (let x = 0; x <= w; x++) line([x, 0, 0], [x, l, 0], '#ffffff14');
+      for (let y = 0; y <= l; y++) line([0, y, 0], [w, y, 0], '#ffffff14');
+    }
     for (const z of [0, h]) {
       const corners: Vec3[] = [[0, 0, z], [w, 0, z], [w, l, z], [0, l, z]];
       for (let i = 0; i < 4; i++) line(corners[i], corners[(i + 1) % 4], z === 0 ? '#c7d6e5a0' : '#bfd4e766', z === 0 ? 2 : 1);
@@ -246,19 +346,26 @@
     }
     ctx.font = '12px system-ui'; ctx.textAlign = 'center'; ctx.fillStyle = '#a9b7cc';
     const text = (p: Vec3, label: string, dy: number) => { const q = project(v, p); ctx.fillText(label, q.x, q.y + dy); };
-    text([w / 2, l, 0], `X · ${w.toFixed(1)} m`, 25);
-    text([w, l / 2, 0], `Y · ${l.toFixed(1)} m`, 25);
-    text([0, 0, h], `Z · ${h.toFixed(1)} m`, -16);
+    if (cameraMode !== 'walk') {
+      text([w / 2, l, 0], `X · ${w.toFixed(1)} m`, 25);
+      text([w, l / 2, 0], `Y · ${l.toFixed(1)} m`, 25);
+      text([0, 0, h], `Z · ${h.toFixed(1)} m`, -16);
+    }
     // Orientation widget remains readable as the room rotates.
-    const origin = { x: 48, y: v.height - 65 };
-    for (const [axis, label, color] of [[0, 'X', '#f68f72'], [1, 'Y', '#8ed3a3'], [2, 'Z', '#80baff']] as const) {
-      const x = origin.x + v.right[axis] * 28, y = origin.y - v.up[axis] * 28;
-      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(x, y); ctx.stroke();
-      ctx.fillStyle = color; ctx.fillText(label, x + v.right[axis] * 9, y - v.up[axis] * 9 + 4);
+    if (cameraMode !== 'walk') {
+      const origin = { x: 48, y: v.height - 65 };
+      for (const [axis, label, color] of [[0, 'X', '#f68f72'], [1, 'Y', '#8ed3a3'], [2, 'Z', '#80baff']] as const) {
+        const x = origin.x + v.right[axis] * 28, y = origin.y - v.up[axis] * 28;
+        ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(x, y); ctx.stroke();
+        ctx.fillStyle = color; ctx.fillText(label, x + v.right[axis] * 9, y - v.up[axis] * 9 + 4);
+      }
     }
   }
 
   onMount(() => {
+    window.addEventListener('keydown', handleWalkKeyDown);
+    window.addEventListener('keyup', handleWalkKeyUp);
+    window.addEventListener('blur', handleWalkBlur);
     renderer = createRenderer(canvas, app.palette);
     let generation = -1;
     client.onError = message => { app.running = false; app.stats.diagnostics.failure = message; };
@@ -279,31 +386,34 @@
       fpsFrames++;
       if(now-fpsSince>=1000) { app.stats.renderFPS=fpsFrames*1000/(now-fpsSince); fpsSince=now; fpsFrames=0; }
       const wallDt = Math.min(0.1, (now - last) / 1000); last = now;
+      if (cameraMode === 'walk') updateWalker(wallDt);
       const s = sim.stats();
       const displayed = temperatureDisplay.update(sim, app.running ? wallDt : 0);
       const targetMin = Math.floor(displayed.min / 2) * 2, targetMax = Math.max(targetMin + 4, Math.ceil(displayed.max / 2) * 2);
       const rangeBlend = app.running ? -Math.expm1(-wallDt / 0.2) : 0;
       dispMin += (targetMin - dispMin) * rangeBlend; dispMax += (targetMax - dispMax) * rangeBlend;
-      transform = viewTransform(app.exterior ? { ...app.room, ceilingM: app.room.ceilingM + roofGeometry(app.room).rise + 0.5 } : app.room, camera, canvas.clientWidth, canvas.clientHeight);
-      renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, temperatures: displayed, temperatureField: temperatureDisplay,
+      transform = cameraMode === 'walk'
+        ? walkTransform(app.room, walkCamera, walkPosition, canvas.clientWidth, canvas.clientHeight)
+        : viewTransform(app.exterior ? { ...app.room, ceilingM: app.room.ceilingM + roofGeometry(app.room).rise + 0.5 } : app.room, camera, canvas.clientWidth, canvas.clientHeight);
+      renderer!.render(sim, dispMin, dispMax, { transform, size: [app.room.widthM, app.room.heightM, app.room.ceilingM], mode: app.view, axis: app.sliceAxis, fraction: app.sliceFraction, walkMode: cameraMode === 'walk', temperatures: displayed, temperatureField: temperatureDisplay,
         furniture: app.room.furniture, selectedFurnitureId: app.selection?.kind === 'furniture' ? app.selection.id : undefined });
       drawOverlay(transform, dispMin, dispMax, wallDt);
-      markers = [
+      markers = cameraMode === 'walk' ? [] : [
         ...app.room.sources.map((p) => ({ ...p, kind: 'source' as const, cold: p.kind === 'cold' })),
         ...app.room.probes.map((p) => ({ ...p, kind: 'probe' as const, cold: false })),
       ].map((p) => { const q = project(transform!, [p.x, p.y, p.z]); return { ...p, px: q.x, py: q.y }; });
-      openingMarkers = app.room.openings.map((o) => {
+      openingMarkers = cameraMode === 'walk' ? [] : app.room.openings.map((o) => {
         const corners = openingPoints(o); const mid = corners[0].map((n, i) => (n + corners[2][i]) / 2) as Vec3;
         const p = project(transform!, mid); return { id: o.id, kind: o.kind, open: o.open, px: p.x, py: p.y };
       });
-      furnitureMarkers = app.room.furniture.map((f) => {
+      furnitureMarkers = cameraMode === 'walk' ? [] : app.room.furniture.map((f) => {
         const p = project(transform!, [f.x, f.y, f.heightM + 0.05]);
         return { id: f.id, label: FURNITURE_PRESETS.find((item) => item.id === f.kind)!.label, px: p.x, py: p.y };
       });
       if (now - lastStats > 200) {
         lastStats = now; app.stats.tMin = dispMin; app.stats.tMax = dispMax;
         hover = null;
-        if (hoverRaw && !drag && !orbit) {
+        if (cameraMode !== 'walk' && hoverRaw && !drag && !orbit) {
           const axis = app.view === 'slice' ? ['x', 'y', 'z'].indexOf(app.sliceAxis) as 0 | 1 | 2 : 2;
           const size = [app.room.widthM, app.room.heightM, app.room.ceilingM];
           const p = pointOnPlane(transform, hoverRaw.px, hoverRaw.py, axis, size[axis] * app.sliceFraction);
@@ -313,7 +423,12 @@
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
-    return () => { cancelAnimationFrame(raf); client.dispose(); renderer?.dispose(); };
+    return () => {
+      cancelAnimationFrame(raf); client.dispose(); renderer?.dispose();
+      window.removeEventListener('keydown', handleWalkKeyDown);
+      window.removeEventListener('keyup', handleWalkKeyUp);
+      window.removeEventListener('blur', handleWalkBlur);
+    };
   });
 </script>
 
@@ -325,17 +440,22 @@
   </div>
   <div class="heading">
     <span class="eyebrow">HEATFLOW / SPATIAL SIMULATION</span>
-    <h2>Room overview</h2>
+    <h2>{cameraMode === 'walk' ? 'Walk through the room' : 'Room overview'}</h2>
     <p>{app.room.widthM.toFixed(1)} × {app.room.heightM.toFixed(1)} × {app.room.ceilingM.toFixed(1)} m <span>·</span> {app.room.convection ? 'Buoyant airflow' : 'Thermal diffusion'}</p>
   </div>
   <div class="view-tools" aria-label="3D view controls">
+    <button aria-pressed={cameraMode === 'orbit'} class:active={cameraMode === 'orbit'} onclick={() => setCameraMode('orbit')}>Orbit</button>
+    <button aria-pressed={cameraMode === 'walk'} class:active={cameraMode === 'walk'} onclick={() => setCameraMode('walk')}>Walk</button>
     <button aria-pressed={app.view === 'volume'} class:active={app.view === 'volume'} onclick={() => (app.view = 'volume')}>Volume</button>
     <button aria-pressed={app.view === 'slice'} class:active={app.view === 'slice'} onclick={() => (app.view = 'slice')}>Slice</button>
     <button onclick={() => zoom(1.15)} aria-label="Zoom in">＋</button>
     <button onclick={() => zoom(1 / 1.15)} aria-label="Zoom out">−</button>
     <button onclick={() => app.cameraToken++} aria-label="Reset camera">↺</button>
   </div>
-  <div class="room" bind:this={roomEl} role="application" aria-label="3D room. Drag empty space to rotate; scroll to zoom. Drag furniture or sources to move; Shift-drag sources to change height. Arrow keys move selected markers, Page Up and Page Down change source height; R rotates furniture."
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="room" bind:this={roomEl} role="application" tabindex="0" aria-label={cameraMode === 'walk'
+    ? 'First-person room view. Use W A S D or arrow keys to walk, hold Shift to move faster, and drag to look around. Press Escape to return to orbit view.'
+    : '3D room. Drag empty space to rotate; scroll to zoom. Drag furniture or sources to move; Shift-drag sources to change height. Arrow keys move selected markers, Page Up and Page Down change source height; R rotates furniture.'}
     onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}
     onpointerleave={() => { hoverRaw = null; hover = null; }} oncontextmenu={(e) => e.preventDefault()}
     onwheel={(e) => { e.preventDefault(); zoom(Math.exp(-e.deltaY * 0.001)); }}>
@@ -368,8 +488,8 @@
     {/if}
   </div>
   <div class="temperature-scale" aria-label="Temperature scale"><div class="scale-label"><span>Temperature</span><span>°C</span></div><div class="scale-gradient" style:background={paletteCssGradient(app.palette, 'to right')}></div><div class="scale-values"><span>{Math.round(app.stats.tMin)}</span><span>{Math.round((app.stats.tMax + app.stats.tMin) / 2)}</span><span>{Math.round(app.stats.tMax)}</span></div></div>
-  <div class="view-caption"><span class="live" class:paused={!app.running}></span>{app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
-  <p class="instructions">Drag to orbit <span>·</span> Scroll to zoom <span>·</span> Shift-drag sources to lift</p>
+  <div class="view-caption"><span class="live" class:paused={!app.running}></span>{cameraMode === 'walk' ? 'First-person room view' : app.view === 'volume' ? '3D temperature volume' : `${app.sliceAxis.toUpperCase()} temperature slice`}<span>·</span>{app.stats.mean.toFixed(1)} °C average</div>
+  <p class="instructions">{cameraMode === 'walk' ? 'W A S D to walk · Drag to look · Shift to move faster · Esc to exit' : 'Drag to orbit · Scroll to zoom · Shift-drag sources to lift'}</p>
 </div>
 
 <style>
@@ -378,7 +498,7 @@
   .eyebrow { color: #8e9eb4; font-size: 10px; letter-spacing: 0.17em; }
   h2 { margin: 8px 0; font-size: 25px; font-weight: 500; letter-spacing: -0.03em; }
   .heading p { margin: 0; color: #91a0b6; font-size: 12px; }
-  .heading p span, .instructions span, .view-caption > span:not(.live) { margin: 0 8px; color: #536179; }
+  .heading p span, .view-caption > span:not(.live) { margin: 0 8px; color: #536179; }
   .room { position: absolute; inset: 175px 0 90px; touch-action: none; cursor: grab; user-select: none; }
   .room:active { cursor: grabbing; }
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
