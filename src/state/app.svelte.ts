@@ -284,6 +284,14 @@ export function updateSource(id: number, patch: Partial<Omit<HeatSource, 'id'>>)
   });
 }
 
+export function updateAllHeaterPower(powerKW: number): void {
+  edit((r) => {
+    for (const source of r.sources) {
+      if (source.kind === 'heat') source.powerKW = powerKW;
+    }
+  });
+}
+
 export function removeSource(id: number): void {
   edit((r) => {
     r.sources = r.sources.filter((s) => s.id !== id);

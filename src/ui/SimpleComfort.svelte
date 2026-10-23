@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { app, updateInsulationLevel, updateRoom, updateThermostat } from '../state/app.svelte';
+  import { app, updateAllHeaterPower, updateInsulationLevel, updateRoom, updateThermostat } from '../state/app.svelte';
   import { LIMITS } from '../sim/config';
   import { INSULATION_LEVELS, isInsulationLevel, matchingInsulationLevel } from '../sim/insulation';
 
   const insulationLevel = $derived(matchingInsulationLevel(app.room));
+  const heaters = $derived(app.room.sources.filter((source) => source.kind === 'heat'));
+  const heaterPowerKW = $derived(heaters[0]?.powerKW ?? 1.5);
 
   function chooseInsulationLevel(value: string) {
     if (isInsulationLevel(value)) updateInsulationLevel(value);
@@ -23,6 +25,16 @@
       step={LIMITS.thermostatTarget.step} value={app.room.thermostat.targetC}
       oninput={(event) => updateThermostat({ targetC: event.currentTarget.valueAsNumber })} />
   </label>
+  {#if heaters.length > 0}
+    <label>
+      <span>Power per heater <output>{heaterPowerKW.toFixed(1)} kW</output></span>
+      <input type="range" min={LIMITS.power.min} max={LIMITS.power.max} step={LIMITS.power.step}
+        value={heaterPowerKW} oninput={(event) => updateAllHeaterPower(event.currentTarget.valueAsNumber)} />
+    </label>
+    <p class="hint">All heaters use the same power setting.</p>
+  {:else}
+    <p class="hint">Add a heater in Advanced mode to configure its power here.</p>
+  {/if}
 </fieldset>
 
 <fieldset>

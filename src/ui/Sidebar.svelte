@@ -11,6 +11,7 @@
     select,
     updateOpening,
     updateRoom,
+    updateAllHeaterPower,
     updateRoof,
     updateSource,
     updateThermostat,
@@ -107,6 +108,8 @@
   function showSimpleMode() {
     simpleMode = true;
     simpleActive = 'Room plan';
+    const firstHeater = app.room.sources.find((source) => source.kind === 'heat');
+    if (firstHeater) updateAllHeaterPower(firstHeater.powerKW);
     if (!app.room.convection) updateRoom({ convection: true });
   }
   function fmtPower(w: number): string {
